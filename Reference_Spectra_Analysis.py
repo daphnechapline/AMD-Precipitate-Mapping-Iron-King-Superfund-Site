@@ -221,11 +221,12 @@ df = column_frame(TARGET_MINERALS, 'b900_center', coq_drop)
 summary += stat_rows('NIR band center', df, list(TARGET_MINERALS))
 
 pairs = [
-    ('coquimbite', 500, 600, 'coquimbite 500–600 nm'),
-    ('rhomboclase', 450, 550, 'rhomboclase 450–550 nm'),
+    ('coquimbite', 500, 600, 'coquimbite', 'Center of absorption band between 500–600 nm'),
+    ('rhomboclase', 450, 550, 'rhomboclase', 'Center of absorption band between 450–550 nm'),
 ]
-df = window_frame(pairs)
-summary += stat_rows('continuum-removed center', df, [p[3] for p in pairs])
+df = window_frame([(m, lo, hi, g) for m, lo, hi, g, _ in pairs])
+for mineral, lo, hi, group, feature in pairs:
+    summary += stat_rows(feature, df, [group])
 
 df = column_frame(['ferricopiapite', 'hematite'], 'b900_start')
 summary += stat_rows('NIR band edge', df, ['ferricopiapite', 'hematite'])
@@ -233,11 +234,11 @@ summary += stat_rows('NIR band edge', df, ['ferricopiapite', 'hematite'])
 df = column_frame(['jarosite'], 'b2265_center')
 df = df.dropna(subset=['value'])
 df['use'] = df['value'] >= 2250
-summary += stat_rows('~2265 nm center', df, ['jarosite'])
+summary += stat_rows('Center of absorption band between 2230–2290 nm', df, ['jarosite'])
 
-pairs = [('goethite', 600, 750, 'goethite 600–750 nm')]
+pairs = [('goethite', 600, 750, 'goethite')]
 df = window_frame(pairs)
-summary += stat_rows('continuum-removed center', df, [pairs[0][3]])
+summary += stat_rows('Center of absorption band between 600–750 nm', df, ['goethite'])
 
 for mineral in ['schwertmannite', 'ferrihydrite']:
     df = column_frame([mineral], 'b900_start')
