@@ -202,7 +202,7 @@ def window_frame(pairs):
 def stat_rows(feature, df, groups):
     out = []
     for g in groups:
-        vals = df.loc[df['use'], 'value'] if g == 'ALL' else df.loc[(df['group'] == g) & df['use'], 'value']
+        vals = df.loc[(df['group'] == g) & df['use'], 'value']
         mean, std, n = mean_std(vals)
         fmt = (lambda k: f'{mean - k * std:.1f}–{mean + k * std:.1f}') if np.isfinite(mean) else (lambda k: '—')
         out.append(dict(feature=feature, mineral=g, n=n,
@@ -218,12 +218,11 @@ coq_drop = set(zip(
 summary = []
 
 df = column_frame(TARGET_MINERALS, 'b900_center', coq_drop)
-summary += stat_rows('~900 nm center', df, list(TARGET_MINERALS) + ['ALL'])
+summary += stat_rows('NIR band center', df, list(TARGET_MINERALS))
 
 pairs = [
     ('coquimbite', 500, 600, 'coquimbite 500–600 nm'),
     ('rhomboclase', 450, 550, 'rhomboclase 450–550 nm'),
-    ('rhomboclase', 1200, 1275, 'rhomboclase 1200–1275 nm'),
 ]
 df = window_frame(pairs)
 summary += stat_rows('continuum-removed center', df, [p[3] for p in pairs])

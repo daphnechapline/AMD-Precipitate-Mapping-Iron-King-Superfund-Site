@@ -364,7 +364,7 @@ def refined_mineral_class(params):
         if np.isfinite(b900_start) and 710 <= b900_start <= 755:
             return 7
         return 0
-    if 980 <= b900 <= 1030 and np.isfinite(b900_start) and 750 <= b900_start <= 785:
+    if 980 <= b900 <= 1020 and np.isfinite(b900_start) and 750 <= b900_start <= 785:
         return 8
     return 0
 
