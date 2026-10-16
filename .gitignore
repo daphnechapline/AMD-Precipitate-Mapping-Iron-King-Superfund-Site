@@ -1,0 +1,13 @@
+# Pipeline outputs
+outputs/
+
+# Synthetic test dataset (regenerate with test/make_synthetic_data.py)
+test/synthetic/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# OS / editor
+.DS_Store
+.vscode/

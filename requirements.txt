@@ -1,0 +1,23 @@
+# Runtime dependencies for Iron_King_Analysis.py and Reference_Spectra_Analysis.py.
+# Install with:  pip install -r requirements.txt   (Python >= 3.10)
+
+numpy>=1.24
+scipy>=1.11
+pandas>=2.0
+
+# Gridded imagery (EMIT / AVIRIS-5 NetCDF, including HDF5 groups)
+xarray>=2023.1
+netCDF4>=1.6
+rioxarray>=0.15
+
+# Vector AOI (KML) and georeferencing
+geopandas>=0.14
+pyogrio>=0.7
+shapely>=2.0
+rasterio>=1.3
+pyproj>=3.6
+
+# Spectral tools
+spectral>=0.23        # ENVI reader, BandResampler, spectral_angles
+pysptools>=0.15       # convex-hull continuum removal, NNLS unmixing
+matplotlib>=3.7       # undeclared import-time dependency of pysptools

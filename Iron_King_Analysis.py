@@ -1,11 +1,51 @@
+"""
+Map acid-mine-drainage (AMD) iron-bearing precipitates at the Iron King Mine
+Superfund site (Dewey-Humboldt, AZ) from field and airborne/orbital imaging
+spectroscopy.
+
+Inputs (paths are relative to the current working directory; run from the
+repository root):
+
+- ``data/asd/*.txt``             ASD field spectra, one file per sampling pit
+- ``data/emit_ortho_crop.nc``    EMIT L2A reflectance, orthorectified and cropped
+- ``data/aviris_rfl.hdr``        AVIRIS reflectance, ENVI format (+ binary)
+- ``data/aviris5_rfl.nc``        AVIRIS-5 reflectance, NetCDF with a
+                                 ``reflectance`` group
+- ``data/IronKing.kml``          Area-of-interest (AOI) polygon(s)
+- ``ref_spectra/{crowley,usgs_minerals,relab}``  laboratory reference spectra
+
+Processing steps (see ``main``):
+
+1. Load all sources and the pure-mineral reference library.
+2. Co-locate each pit with its EMIT, AVIRIS and AVIRIS-5 pixel and convolve
+   the ASD spectrum to EMIT bands.
+3. Clip each image to the AOI and build mean reference endmembers on every
+   sensor's band grid.
+4. Compute continuum-removed band parameters for pit spectra and AOI means.
+5. Classify every AOI pixel three ways: a rule-based decision tree on band
+   parameters, spectral angle mapping (SAM), and non-negative least squares
+   (NNLS) unmixing.
+6. Write summary tables to ``outputs/``.
+
+Mineral classes (``MINERALS``): 1 coquimbite, 2 rhomboclase, 3 ferricopiapite,
+4 hematite, 5 jarosite, 6 goethite, 7 schwertmannite, 8 ferrihydrite;
+0 means unclassified.
+"""
 import os
 import re
 import glob
+import logging
 import warnings
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 import xarray as xr
+# Registers the ``.rio`` accessor used in main(). It would otherwise only be
+# registered as a side effect of xr.open_dataset loading rioxarray's backend.
+import rioxarray  # noqa: F401
 import geopandas as gpd
 import spectral
 from spectral import BandResampler
@@ -20,8 +60,14 @@ from rasterio.transform import Affine, rowcol
 from rasterio.features import geometry_mask
 from pyproj import Transformer
 
+# Silences all library warnings (e.g. all-NaN slices in nanmean, CRS notices).
 warnings.simplefilter('ignore')
 
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Input / output locations
+# ---------------------------------------------------------------------------
 DATA = 'data'
 ASD_DIR = f'{DATA}/asd'
 EMIT_PATH = f'{DATA}/emit_ortho_crop.nc'
@@ -29,12 +75,23 @@ AVIRIS_HDR = f'{DATA}/aviris_rfl.hdr'
 AVIRIS5_PATH = f'{DATA}/aviris5_rfl.nc'
 AOI_PATH = f'{DATA}/IronKing.kml'
 REF_DIR = 'ref_spectra'
+USGS_WAVELENGTH_FILE = (
+    f'{REF_DIR}/usgs_minerals/s07_ASD_Wavelengths_ASD_0.35-2.5_microns_2151_ch.txt')
 OUT_DIR = 'outputs'
 
+# ---------------------------------------------------------------------------
+# Processing parameters
+# ---------------------------------------------------------------------------
+# Atmospheric water-vapor windows (nm) set to NaN in every spectrum.
 BAD_WAVELENGTH_WINDOWS = [(1275, 1475), (1750, 1975)]
+# Savitzky-Golay smoothing switch; when False the SG settings below only set
+# the minimum number of valid bands a pixel needs (see smooth_pixel_spectrum).
 APPLY_SG_SMOOTH = False
+# SAM pixels whose best spectral angle exceeds this (radians) are unclassified.
 SAM_MAX_ANGLE_RAD = 0.2
+# USGS reference spectra with a noise index above this are discarded.
 NOISE_THRESHOLD = 2e-4
+# WGS 84 / UTM zone 12N; pit coordinates and AVIRIS-5 grid are in this CRS.
 UTM = 'EPSG:32612'
 
 MINERALS = [
@@ -49,8 +106,11 @@ MINERALS = [
 ]
 MINERAL_NAMES = [name for _, name in MINERALS]
 MINERAL_KEYS = [name.lower() for name in MINERAL_NAMES]
+# Reserved class id; no classifier in this script currently emits it.
 UNCONFIRMED_ID = 9
 
+# Field sampling pits: name -> (easting, northing) in UTM 12N meters.
+# Each name must match an ASD file stem in ASD_DIR (e.g. IK24-PIT-001.txt).
 PITS = {
     'IK24-PIT-001': (384838, 3818515),
     'IK24-PIT-002': (384968, 3818473),
@@ -64,12 +124,14 @@ PITS = {
     'IK24-PIT-010': (385323, 3818149),
 }
 
+# Savitzky-Golay (window length, polynomial order) per sensor.
 SG = {
     'emit': (7, 3),
     'aviris': (13, 3),
     'aviris5': (13, 3),
 }
 
+# Columns written to band_params.csv (see compute_band_params for meanings).
 PARAM_KEYS = [
     'b500_center', 'b500_depth', 'b500_area',
     'absorption_edge', 'vis_peak',
@@ -79,7 +141,24 @@ PARAM_KEYS = [
 ]
 
 
-def bad_wavelength_mask(wavelengths):
+# ---------------------------------------------------------------------------
+# Generic spectrum utilities
+# ---------------------------------------------------------------------------
+def bad_wavelength_mask(wavelengths: npt.ArrayLike) -> np.ndarray:
+    """
+    Flag bands that fall inside the atmospheric water-vapor windows.
+
+    Parameters
+    ----------
+    wavelengths : array_like
+        Band centers in nm, shape (n_bands,).
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask, shape (n_bands,); True where the band lies inside any
+        interval of ``BAD_WAVELENGTH_WINDOWS`` (inclusive).
+    """
     wvl = np.asarray(wavelengths, dtype=float)
     bad = np.zeros(len(wvl), dtype=bool)
     for lo, hi in BAD_WAVELENGTH_WINDOWS:
@@ -87,13 +166,42 @@ def bad_wavelength_mask(wavelengths):
     return bad
 
 
-def apply_bad_wavelength_mask(wavelengths, reflectance):
+def apply_bad_wavelength_mask(wavelengths: npt.ArrayLike, reflectance: npt.ArrayLike) -> np.ndarray:
+    """
+    Return a flattened copy of a spectrum with water-vapor bands set to NaN.
+
+    Parameters
+    ----------
+    wavelengths : array_like
+        Band centers in nm, shape (n_bands,).
+    reflectance : array_like
+        Reflectance values; flattened to shape (n_bands,).
+
+    Returns
+    -------
+    np.ndarray
+        Float copy of ``reflectance`` with bad bands replaced by NaN.
+    """
     out = np.asarray(reflectance, dtype=float).copy().reshape(-1)
     out[bad_wavelength_mask(wavelengths)] = np.nan
     return out
 
 
-def max_normalize_spectrum(rfl):
+def max_normalize_spectrum(rfl: npt.ArrayLike) -> np.ndarray:
+    """
+    Scale a spectrum so its largest finite, positive value equals 1.
+
+    Parameters
+    ----------
+    rfl : array_like
+        Reflectance spectrum (any shape).
+
+    Returns
+    -------
+    np.ndarray
+        Float copy divided by its finite positive maximum. Returned unscaled if
+        no finite positive values exist.
+    """
     out = np.asarray(rfl, dtype=float).copy()
     finite = np.isfinite(out) & (out > 0)
     if not finite.any():
@@ -104,11 +212,34 @@ def max_normalize_spectrum(rfl):
     return out
 
 
-def envi_georef_from_hdr(hdr_path):
+def envi_georef_from_hdr(hdr_path: str) -> tuple[CRS, Affine]:
+    """
+    Build a CRS and affine transform from an ENVI header's ``map info`` field.
+
+    Parameters
+    ----------
+    hdr_path : str
+        Path to the ENVI ``.hdr`` file.
+
+    Returns
+    -------
+    crs : rasterio.crs.CRS
+        UTM CRS from the zone/hemisphere fields, or the CRS parsed from
+        ``coordinate system string`` for non-UTM projections.
+    transform : rasterio.transform.Affine
+        North-up pixel-to-map transform (rotation is not supported).
+
+    Raises
+    ------
+    ValueError
+        If the header has no ``map info``, or uses a non-UTM projection
+        without a ``coordinate system string``.
+    """
     text = open(hdr_path).read()
     m = re.search(r'map info\s*=\s*\{([^}]+)\}', text, re.IGNORECASE)
     if not m:
         raise ValueError(f'No map info in ENVI header: {hdr_path}')
+    # map info = {proj, ref_px, ref_py, map_x, map_y, size_x, size_y, zone, hemisphere, ...}
     parts = [p.strip() for p in m.group(1).split(',')]
     proj_name = parts[0]
     ref_px, ref_py = float(parts[1]), float(parts[2])
@@ -124,12 +255,31 @@ def envi_georef_from_hdr(hdr_path):
         if not m_wkt:
             raise ValueError(f'Unsupported ENVI projection: {proj_name}')
         crs = CRS.from_wkt(m_wkt.group(1))
+    # The tie point (map_x, map_y) is treated as the center of reference pixel
+    # (ref_px, ref_py), so the grid origin is shifted back half a pixel.
+    # NOTE (review): GDAL's ENVI driver treats the tie point as the pixel's
+    # upper-left corner (no half-pixel shift). For a {1, 1, x, y} header this
+    # function places the origin 0.5 px west and north of GDAL's result.
     west = map_x - ps_x * ((ref_px - 1.0) + 0.5)
     north = map_y + ps_y * ((ref_py - 1.0) + 0.5)
     return crs, Affine(ps_x, 0.0, west, 0.0, -ps_y, north)
 
 
-def scale_aviris_reflectance(pix):
+def scale_aviris_reflectance(pix: npt.ArrayLike) -> np.ndarray:
+    """
+    Convert an AVIRIS pixel spectrum to unit reflectance.
+
+    Parameters
+    ----------
+    pix : array_like
+        Raw pixel spectrum, shape (n_bands,).
+
+    Returns
+    -------
+    np.ndarray
+        Flattened float copy, divided by 10000 if it appears to be stored as
+        scaled integers (max > 2), with values below -0.1 set to NaN.
+    """
     pix = np.asarray(pix, dtype=float).copy().ravel()
     if pix.size and np.nanmax(pix) > 2:
         pix /= 10000.0
@@ -137,7 +287,29 @@ def scale_aviris_reflectance(pix):
     return pix
 
 
-def nearest_emit_valid_mask(src_wvl, emit_wvl, emit_rfl):
+def nearest_emit_valid_mask(
+    src_wvl: npt.ArrayLike, emit_wvl: npt.ArrayLike, emit_rfl: npt.ArrayLike
+) -> np.ndarray:
+    """
+    Transfer EMIT's valid-band mask onto another sensor's band grid.
+
+    Each source band inherits the validity (finite and > 0) of the nearest
+    EMIT band, so spectra from different sensors share the same gaps.
+
+    Parameters
+    ----------
+    src_wvl : array_like
+        Band centers of the target sensor in nm, shape (n_src,).
+    emit_wvl : array_like
+        EMIT band centers in nm, shape (n_emit,).
+    emit_rfl : array_like
+        EMIT reflectance spectrum, shape (n_emit,).
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask, shape (n_src,).
+    """
     emit_wvl = np.asarray(emit_wvl, dtype=float)
     src_wvl = np.asarray(src_wvl, dtype=float)
     emit_ok = np.isfinite(emit_rfl) & (np.asarray(emit_rfl, dtype=float) > 0)
@@ -145,7 +317,32 @@ def nearest_emit_valid_mask(src_wvl, emit_wvl, emit_rfl):
     return emit_ok[idx]
 
 
-def gaussian_resample(src_wvl, src_rfl, dst_wvl, dst_fwhm):
+def gaussian_resample(
+    src_wvl: npt.ArrayLike, src_rfl: npt.ArrayLike, dst_wvl: npt.ArrayLike, dst_fwhm: npt.ArrayLike
+) -> np.ndarray:
+    """
+    Convolve a spectrum to a target band set with Gaussian spectral responses.
+
+    Each output band is the Gaussian-weighted mean of finite source samples
+    within +/- 3 sigma of the band center (sigma = FWHM / 2.3548).
+
+    Parameters
+    ----------
+    src_wvl : array_like
+        Source wavelengths in nm, shape (n_src,).
+    src_rfl : array_like
+        Source reflectance, shape (n_src,).
+    dst_wvl : array_like
+        Target band centers in nm, shape (n_dst,).
+    dst_fwhm : array_like
+        Target band FWHM in nm, shape (n_dst,).
+
+    Returns
+    -------
+    np.ndarray
+        Resampled reflectance, shape (n_dst,). NaN for target bands outside the
+        source range, with invalid FWHM, or with no source samples in range.
+    """
     src_wvl = np.asarray(src_wvl, dtype=float)
     src_rfl = np.asarray(src_rfl, dtype=float)
     dst_wvl = np.asarray(dst_wvl, dtype=float)
@@ -157,7 +354,7 @@ def gaussian_resample(src_wvl, src_rfl, dst_wvl, dst_fwhm):
         return out
     order = np.argsort(sw)
     sw, sr = sw[order], sr[order]
-    sig = 2.0 * np.sqrt(2.0 * np.log(2.0))
+    sig = 2.0 * np.sqrt(2.0 * np.log(2.0))  # FWHM-to-sigma factor
     for i, (c, f) in enumerate(zip(dst_wvl, dst_fwhm)):
         if not (np.isfinite(c) and np.isfinite(f) and f > 0):
             continue
@@ -175,7 +372,30 @@ def gaussian_resample(src_wvl, src_rfl, dst_wvl, dst_fwhm):
     return out
 
 
-def continuum_removal(refl_values, wavelengths):
+# ---------------------------------------------------------------------------
+# Continuum removal and band parameters
+# ---------------------------------------------------------------------------
+def continuum_removal(refl_values: npt.ArrayLike, wavelengths: npt.ArrayLike) -> np.ndarray:
+    """
+    Divide a spectrum by its upper convex hull (continuum removal).
+
+    Water-vapor bands and non-positive values are excluded before the hull is
+    fitted.
+
+    Parameters
+    ----------
+    refl_values : array_like
+        Reflectance spectrum, shape (n_bands,).
+    wavelengths : array_like
+        Band centers in nm, shape (n_bands,).
+
+    Returns
+    -------
+    np.ndarray
+        Continuum-removed spectrum, shape (n_bands,), with values in (0, 1]
+        on valid bands and NaN elsewhere. All NaN if fewer than 11 valid
+        bands remain or the hull fit fails.
+    """
     refl = apply_bad_wavelength_mask(wavelengths, refl_values)
     mask = np.isfinite(refl) & (refl > 0)
     cr = np.full(len(wavelengths), np.nan)
@@ -189,7 +409,29 @@ def continuum_removal(refl_values, wavelengths):
     return cr
 
 
-def vis_cr_band_center(wvl, cr, wmin, wmax, min_depth=0.01):
+def vis_cr_band_center(
+    wvl: np.ndarray, cr: np.ndarray, wmin: float, wmax: float, min_depth: float = 0.01
+) -> float:
+    """
+    Wavelength of the continuum-removed minimum inside a window.
+
+    Parameters
+    ----------
+    wvl : np.ndarray
+        Band centers in nm.
+    cr : np.ndarray
+        Continuum-removed spectrum on ``wvl``.
+    wmin, wmax : float
+        Inclusive search window in nm.
+    min_depth : float, optional
+        Minimum band depth (1 - CR) required to report a center.
+
+    Returns
+    -------
+    float
+        Band-center wavelength in nm, or NaN if fewer than 3 valid bands are
+        in the window or the band is not deeper than ``min_depth``.
+    """
     m = (wvl >= wmin) & (wvl <= wmax) & np.isfinite(wvl) & np.isfinite(cr)
     if m.sum() < 3:
         return np.nan
@@ -200,7 +442,31 @@ def vis_cr_band_center(wvl, cr, wmin, wmax, min_depth=0.01):
     return float(w_seg[i])
 
 
-def first_cr_unity(wavelengths, cr, wmin, wmax, descending=False):
+def first_cr_unity(
+    wavelengths: npt.ArrayLike, cr: npt.ArrayLike, wmin: float, wmax: float, descending: bool = False
+) -> float:
+    """
+    First wavelength in a window where the continuum-removed spectrum reaches 1.
+
+    A CR value of 1 marks a convex-hull tie point, i.e. a band shoulder.
+
+    Parameters
+    ----------
+    wavelengths : array_like
+        Band centers in nm.
+    cr : array_like
+        Continuum-removed spectrum on ``wavelengths``.
+    wmin, wmax : float
+        Inclusive search window in nm.
+    descending : bool, optional
+        If True, scan from ``wmax`` down to ``wmin`` (finds the short-wavelength
+        shoulder nearest a band); otherwise scan upward.
+
+    Returns
+    -------
+    float
+        Shoulder wavelength in nm, or NaN if none is found.
+    """
     wvl = np.asarray(wavelengths, dtype=float)
     cr = np.asarray(cr, dtype=float)
     sel = (wvl >= wmin) & (wvl <= wmax)
@@ -215,7 +481,47 @@ def first_cr_unity(wavelengths, cr, wmin, wmax, descending=False):
     return float(w[hit[0]]) if len(hit) else np.nan
 
 
-def compute_band_params(cr, wavelengths, reflectance=None, b900_max=1300):
+def compute_band_params(
+    cr: npt.ArrayLike,
+    wavelengths: npt.ArrayLike,
+    reflectance: npt.ArrayLike | None = None,
+    b900_max: float = 1300,
+) -> dict[str, float] | None:
+    """
+    Derive absorption-band parameters from a continuum-removed spectrum.
+
+    Parameters
+    ----------
+    cr : array_like
+        Continuum-removed spectrum, shape (n_bands,).
+    wavelengths : array_like
+        Band centers in nm, shape (n_bands,).
+    reflectance : array_like, optional
+        Original reflectance; needed for ``vis_peak`` and the ``b500`` band.
+    b900_max : float, optional
+        Upper limit (nm) of the ~900 nm Fe3+ band search window (lower limit
+        is 720 nm).
+
+    Returns
+    -------
+    dict or None
+        Keys (NaN when a feature is absent or shallower than 0.01):
+
+        - ``b900_center/depth/area``: CR minimum, depth and integrated area
+          in 720-``b900_max`` nm.
+        - ``WAC``: wavelength that splits the b900 band area in half.
+        - ``b900_start``: short-wavelength shoulder of the b900 band
+          (first CR = 1 scanning down from 800 to 625 nm).
+        - ``b2265_center/depth/area``: jarosite feature in 2230-2290 nm.
+        - ``cr_500_600``, ``cr_450_550``, ``cr_1200_1275``, ``cr_600_750``:
+          CR minimum position in each window.
+        - ``absorption_edge``: first CR = 1 scanning up from 500 to 720 nm.
+        - ``vis_peak``: wavelength of maximum reflectance in 400-800 nm.
+        - ``b500_center/depth/area``: CR minimum in 380-700 nm.
+
+        None if fewer than 11 valid CR values or fewer than 3 in the b900
+        window.
+    """
     wavelengths = np.asarray(wavelengths, dtype=float)
     cr = np.asarray(cr, dtype=float)
     valid = ~np.isnan(cr)
@@ -223,7 +529,17 @@ def compute_band_params(cr, wavelengths, reflectance=None, b900_max=1300):
     if len(cr_v) < 11:
         return None
 
-    def store_band(result, prefix, wvl_seg, cr_seg, wmin, wmax, clip=True):
+    def store_band(
+        result: dict[str, float], prefix: str, wvl_seg: np.ndarray, cr_seg: np.ndarray,
+        wmin: float, wmax: float, clip: bool = True,
+    ) -> bool:
+        """
+        Write ``{prefix}_center/_depth/_area`` for one band into ``result``.
+
+        ``wmin``/``wmax`` are not used (segments are pre-selected by the
+        caller). With ``clip`` the integrand 1 - CR is clipped at zero.
+        Returns True if a band deeper than 0.01 was found.
+        """
         result[f'{prefix}_center'] = np.nan
         result[f'{prefix}_depth'] = np.nan
         result[f'{prefix}_area'] = np.nan
@@ -239,6 +555,7 @@ def compute_band_params(cr, wavelengths, reflectance=None, b900_max=1300):
         result[f'{prefix}_area'] = float(integrate.simpson(band_signal, wvl_seg))
         return True
 
+    # ~900 nm Fe3+ crystal-field band
     b900_min = 720
     bm = (wvl_v >= b900_min) & (wvl_v <= b900_max)
     wav_seg, cr_seg = wvl_v[bm], cr_v[bm]
@@ -247,6 +564,9 @@ def compute_band_params(cr, wavelengths, reflectance=None, b900_max=1300):
     result = {}
     b900_ok = store_band(result, 'b900', wav_seg, cr_seg, b900_min, b900_max, clip=False)
     if b900_ok:
+        # Scan left to right; the area to the right of each band falls from
+        # the full area toward 0. WAC is linearly interpolated where it
+        # crosses half the total.
         halfarea = result['b900_area'] / 2
         smaller_wav, smaller_int = wav_seg[0], result['b900_area']
         wac = wav_seg[-1]
@@ -261,6 +581,7 @@ def compute_band_params(cr, wavelengths, reflectance=None, b900_max=1300):
     else:
         result['WAC'] = np.nan
         result['b900_start'] = np.nan
+    # ~2265 nm jarosite (Fe-OH) band
     store_band(result, 'b2265', wvl_v[(wvl_v >= 2230) & (wvl_v <= 2290)],
                cr_v[(wvl_v >= 2230) & (wvl_v <= 2290)], 2230, 2290)
     result['cr_500_600'] = vis_cr_band_center(wvl_v, cr_v, 500, 600)
@@ -274,12 +595,37 @@ def compute_band_params(cr, wavelengths, reflectance=None, b900_max=1300):
         vis = (wavelengths > 400) & (wavelengths < 800) & np.isfinite(reflectance)
         if vis.any():
             result['vis_peak'] = wavelengths[vis][np.argmax(reflectance[vis])]
+        # NOTE (review): unlike the other bands this uses the unfiltered `cr`,
+        # so any NaN in 380-700 nm makes np.argmin return the NaN position and
+        # yields a NaN depth/area with a spurious center.
         b500 = (wavelengths >= 380) & (wavelengths <= 700)
         store_band(result, 'b500', wavelengths[b500], cr[b500], 380, 700)
     return result
 
 
-def band_params_from_spectrum(wvl, rfl, b900_max=1300):
+def band_params_from_spectrum(
+    wvl: npt.ArrayLike, rfl: npt.ArrayLike, b900_max: float = 1300
+) -> dict[str, Any] | None:
+    """
+    Continuum-remove a reflectance spectrum and compute its band parameters.
+
+    Parameters
+    ----------
+    wvl : array_like
+        Band centers in nm, shape (n_bands,).
+    rfl : array_like
+        Reflectance spectrum, shape (n_bands,).
+    b900_max : float, optional
+        Upper limit of the ~900 nm band window, passed to
+        ``compute_band_params``.
+
+    Returns
+    -------
+    dict or None
+        Output of ``compute_band_params`` plus ``cr`` (continuum-removed
+        spectrum) and ``wavelengths``; None if there are fewer than 11 finite
+        reflectance values or no parameters could be computed.
+    """
     wvl = np.asarray(wvl, dtype=float)
     rfl = np.asarray(rfl, dtype=float)
     if np.isfinite(rfl).sum() < 11:
@@ -293,7 +639,26 @@ def band_params_from_spectrum(wvl, rfl, b900_max=1300):
     return params
 
 
-def smooth_spectrum(vals, window, polyorder):
+def smooth_spectrum(vals: npt.ArrayLike, window: int, polyorder: int) -> np.ndarray:
+    """
+    Savitzky-Golay smooth the finite values of a spectrum.
+
+    Does nothing (returns a copy) when ``APPLY_SG_SMOOTH`` is False.
+
+    Parameters
+    ----------
+    vals : array_like
+        Spectrum, shape (n_bands,).
+    window : int
+        SG window length (bands).
+    polyorder : int
+        SG polynomial order.
+
+    Returns
+    -------
+    np.ndarray
+        Smoothed copy; NaNs are left in place.
+    """
     out = np.asarray(vals, dtype=float).copy()
     if not APPLY_SG_SMOOTH:
         return out
@@ -303,7 +668,32 @@ def smooth_spectrum(vals, window, polyorder):
     return out
 
 
-def smooth_pixel_spectrum(wvl, rfl, window, polyord):
+def smooth_pixel_spectrum(
+    wvl: npt.ArrayLike, rfl: npt.ArrayLike, window: int, polyord: int
+) -> np.ndarray | None:
+    """
+    Mask, gap-fill, optionally smooth, then re-mask a pixel spectrum.
+
+    Invalid bands (water-vapor windows, non-finite, <= 0) are linearly
+    interpolated so the SG filter sees a continuous signal, then restored to
+    NaN after smoothing.
+
+    Parameters
+    ----------
+    wvl : array_like
+        Band centers in nm, shape (n_bands,).
+    rfl : array_like
+        Reflectance, shape (n_bands,).
+    window : int
+        SG window length; also the minimum valid-band count (at least 11).
+    polyord : int
+        SG polynomial order.
+
+    Returns
+    -------
+    np.ndarray or None
+        Processed spectrum, or None if too few valid bands.
+    """
     wvl = np.asarray(wvl, dtype=float)
     rfl = apply_bad_wavelength_mask(wvl, rfl)
     valid = np.isfinite(rfl) & (rfl > 0)
@@ -318,7 +708,30 @@ def smooth_pixel_spectrum(wvl, rfl, window, polyord):
     return out
 
 
-def cr_absorption_depth(cr, wvl, wmin, wmax, min_points=2):
+def cr_absorption_depth(
+    cr: npt.ArrayLike, wvl: npt.ArrayLike, wmin: float, wmax: float, min_points: int = 2
+) -> tuple[float, float]:
+    """
+    Depth and position of the continuum-removed minimum in a window.
+
+    Parameters
+    ----------
+    cr : array_like
+        Continuum-removed spectrum.
+    wvl : array_like
+        Band centers in nm.
+    wmin, wmax : float
+        Inclusive window in nm.
+    min_points : int, optional
+        Minimum number of finite CR values required in the window.
+
+    Returns
+    -------
+    depth : float
+        1 - min(CR), or 0.0 if too few points.
+    center : float
+        Wavelength of the minimum in nm, or NaN if too few points.
+    """
     wvl = np.asarray(wvl, dtype=float)
     cr = np.asarray(cr, dtype=float)
     m = (wvl >= wmin) & (wvl <= wmax) & np.isfinite(cr)
@@ -328,7 +741,46 @@ def cr_absorption_depth(cr, wvl, wmin, wmax, min_points=2):
     return float(1.0 - cr[m][i]), float(wvl[m][i])
 
 
-def refined_mineral_class(params):
+# ---------------------------------------------------------------------------
+# Classifiers
+# ---------------------------------------------------------------------------
+def refined_mineral_class(params: dict[str, Any]) -> int:
+    """
+    Rule-based decision tree that assigns a mineral class from band parameters.
+
+    The first split is the ~900 nm band center (``b900_center``); each branch
+    then checks a second diagnostic feature. The feature/mineral pairs are the
+    ones summarized by ``Reference_Spectra_Analysis.py``; the numeric windows
+    are hard-coded here.
+
+    ==============  ===============  ==========================================
+    b900 center     Class            Second test
+    ==============  ===============  ==========================================
+    780-800 nm      1 Coquimbite     CR minimum 545-595 nm (500-600 window),
+                                     and no rhomboclase band
+                    2 Rhomboclase    CR minimum 500-545 nm (450-550 window),
+                                     and no coquimbite band
+    865-895 nm      3 Ferricopiapite band shoulder (b900_start) 660-695 nm
+                    4 Hematite       band shoulder 725-755 nm
+    910-940 nm      5 Jarosite       2230-2290 nm band centered 2255-2275 nm
+    940-980 nm      6 Goethite       CR minimum 625-715 nm (600-750 window)
+                    7 Schwertmannite otherwise, band shoulder 710-755 nm
+    980-1020 nm     8 Ferrihydrite   band shoulder 750-785 nm
+    ==============  ===============  ==========================================
+
+    All absorption tests require a depth > 0.01.
+
+    Parameters
+    ----------
+    params : dict
+        Output of ``band_params_from_spectrum`` (must include ``cr`` and
+        ``wavelengths``).
+
+    Returns
+    -------
+    int
+        Class id 1-8, or 0 if no rule matches.
+    """
     b900 = params.get('b900_center', np.nan)
     b900_depth = params.get('b900_depth', np.nan)
     if not np.isfinite(b900) or b900_depth <= 0.01:
@@ -369,24 +821,84 @@ def refined_mineral_class(params):
     return 0
 
 
-def refined_class_from_spectrum(wvl, rfl, window, polyord):
+def refined_class_from_spectrum(
+    wvl: npt.ArrayLike, rfl: npt.ArrayLike, window: int, polyord: int
+) -> int:
+    """
+    Classify one reflectance spectrum with the decision tree.
+
+    Parameters
+    ----------
+    wvl : array_like
+        Band centers in nm.
+    rfl : array_like
+        Reflectance spectrum.
+    window, polyord : int
+        Savitzky-Golay settings passed to ``smooth_pixel_spectrum``.
+
+    Returns
+    -------
+    int
+        Class id 0-8 (see ``refined_mineral_class``).
+    """
     sm = smooth_pixel_spectrum(wvl, rfl, window, polyord)
     if sm is None:
         return 0
+    # NOTE (review): uses the default b900_max=1300 nm, whereas the band
+    # parameter tables in main() and the reference statistics in
+    # Reference_Spectra_Analysis.py search the ~900 nm band up to 1200 nm.
     params = band_params_from_spectrum(wvl, sm)
     if not params:
         return 0
     return refined_mineral_class(params)
 
 
-def prep_spectrum_for_sam(wvl, rfl):
+def prep_spectrum_for_sam(wvl: npt.ArrayLike, rfl: npt.ArrayLike) -> np.ndarray:
+    """
+    Mask water-vapor and non-positive bands, then max-normalize, for SAM.
+
+    Parameters
+    ----------
+    wvl : array_like
+        Band centers in nm.
+    rfl : array_like
+        Reflectance spectrum.
+
+    Returns
+    -------
+    np.ndarray
+        Max-normalized spectrum with invalid bands as NaN.
+    """
     rfl = apply_bad_wavelength_mask(wvl, rfl)
     rfl = np.asarray(rfl, dtype=float)
     rfl[~(np.isfinite(rfl) & (rfl > 0))] = np.nan
     return max_normalize_spectrum(rfl)
 
 
-def sam_class_from_spectrum(wvl, rfl, members):
+def sam_class_from_spectrum(wvl: npt.ArrayLike, rfl: npt.ArrayLike, members: npt.ArrayLike) -> int:
+    """
+    Spectral Angle Mapper classification of one spectrum.
+
+    Only bands that are valid in the pixel and in every endmember are used;
+    both are re-normalized on that common band set.
+
+    Parameters
+    ----------
+    wvl : array_like
+        Band centers in nm, shape (n_bands,).
+    rfl : array_like
+        Reflectance spectrum, shape (n_bands,).
+    members : array_like
+        Endmember spectra, shape (n_minerals, n_bands), ordered as
+        ``MINERALS``.
+
+    Returns
+    -------
+    int
+        1-based index of the endmember with the smallest angle, or 0 if fewer
+        than 10 common bands, any angle is non-finite, or the best angle
+        exceeds ``SAM_MAX_ANGLE_RAD``.
+    """
     pix = prep_spectrum_for_sam(wvl, rfl)
     members = np.asarray(members, dtype=float).copy()
     members[:, bad_wavelength_mask(wvl)] = np.nan
@@ -395,6 +907,7 @@ def sam_class_from_spectrum(wvl, rfl, members):
         return 0
     pix_n = max_normalize_spectrum(pix[valid])
     mem = np.vstack([max_normalize_spectrum(row) for row in members[:, valid]])
+    # spectral_angles expects an image cube; wrap the pixel as 1x1.
     ang = np.asarray(spectral_angles(pix_n.reshape(1, 1, -1), mem), dtype=float).ravel()
     if not np.all(np.isfinite(ang)):
         return 0
@@ -404,7 +917,22 @@ def sam_class_from_spectrum(wvl, rfl, members):
     return k + 1
 
 
-def prep_spectrum_for_unmix(wvl, rfl):
+def prep_spectrum_for_unmix(wvl: npt.ArrayLike, rfl: npt.ArrayLike) -> np.ndarray:
+    """
+    Mask water-vapor bands, zero negative values, then max-normalize, for NNLS.
+
+    Parameters
+    ----------
+    wvl : array_like
+        Band centers in nm.
+    rfl : array_like
+        Reflectance spectrum.
+
+    Returns
+    -------
+    np.ndarray
+        Max-normalized spectrum; NaN on masked or non-finite bands.
+    """
     rfl = apply_bad_wavelength_mask(wvl, rfl)
     rfl = np.asarray(rfl, dtype=float)
     rfl[np.isfinite(rfl) & (rfl < 0)] = 0.0
@@ -412,7 +940,35 @@ def prep_spectrum_for_unmix(wvl, rfl):
     return max_normalize_spectrum(rfl)
 
 
-def nnls_abundances(wvl, specs, members, min_bands=10):
+def nnls_abundances(
+    wvl: npt.ArrayLike, specs: npt.ArrayLike, members: npt.ArrayLike, min_bands: int = 10
+) -> np.ndarray:
+    """
+    Non-negative least-squares unmixing of spectra against mineral endmembers.
+
+    Spectra and endmembers are max-normalized on the bands where every
+    endmember is finite. Abundances are constrained to be >= 0 but are not
+    forced to sum to one, so they are relative weights rather than areal
+    fractions.
+
+    Parameters
+    ----------
+    wvl : array_like
+        Band centers in nm, shape (n_bands,).
+    specs : array_like
+        One spectrum (n_bands,) or many (n_spectra, n_bands).
+    members : array_like
+        Endmembers, shape (n_minerals, n_bands).
+    min_bands : int, optional
+        Minimum number of common valid bands; otherwise all-NaN output.
+
+    Returns
+    -------
+    np.ndarray
+        Abundances, shape (n_minerals,) for one input spectrum or
+        (n_spectra, n_minerals). Rows are NaN for spectra with any invalid
+        band in the common band set.
+    """
     specs = np.asarray(specs, dtype=float)
     one = specs.ndim == 1
     if one:
@@ -435,7 +991,21 @@ def nnls_abundances(wvl, specs, members, min_bands=10):
     return abund[0] if one else abund
 
 
-def nnls_class_from_abundance(abund):
+def nnls_class_from_abundance(abund: npt.ArrayLike) -> int:
+    """
+    Class id of the dominant (largest positive) NNLS abundance.
+
+    Parameters
+    ----------
+    abund : array_like
+        Abundance vector, shape (n_minerals,).
+
+    Returns
+    -------
+    int
+        1-based mineral id, or 0 if the vector is all NaN, has the wrong
+        length, or its maximum is <= 0.
+    """
     abund = np.asarray(abund, dtype=float).ravel()
     if abund.size != len(MINERAL_KEYS) or not np.any(np.isfinite(abund)):
         return 0
@@ -446,7 +1016,21 @@ def nnls_class_from_abundance(abund):
     return k + 1
 
 
-def class_from_abund_cube(abund):
+def class_from_abund_cube(abund: np.ndarray) -> np.ndarray:
+    """
+    Per-pixel dominant-abundance class map.
+
+    Parameters
+    ----------
+    abund : np.ndarray
+        Abundance cube, shape (n_rows, n_cols, n_minerals).
+
+    Returns
+    -------
+    np.ndarray
+        uint8 class map, shape (n_rows, n_cols); 0 where all abundances are
+        NaN or the maximum is <= 0.
+    """
     cls = np.zeros(abund.shape[:2], dtype=np.uint8)
     finite = np.any(np.isfinite(abund), axis=2)
     if finite.any():
@@ -457,7 +1041,30 @@ def class_from_abund_cube(abund):
     return cls
 
 
-def noise_index(wvl, rfl, lo=500.0, hi=1350.0):
+# ---------------------------------------------------------------------------
+# Reference spectral library
+# ---------------------------------------------------------------------------
+def noise_index(wvl: npt.ArrayLike, rfl: npt.ArrayLike, lo: float = 500.0, hi: float = 1350.0) -> float:
+    """
+    Relative high-frequency noise of a spectrum.
+
+    Median absolute second difference divided by median reflectance within
+    ``[lo, hi]`` nm.
+
+    Parameters
+    ----------
+    wvl : array_like
+        Wavelengths in nm.
+    rfl : array_like
+        Reflectance.
+    lo, hi : float, optional
+        Evaluation window in nm.
+
+    Returns
+    -------
+    float
+        Noise index, or NaN if fewer than 20 finite samples are in the window.
+    """
     wvl = np.asarray(wvl, dtype=float)
     rfl = np.asarray(rfl, dtype=float)
     m = (wvl >= lo) & (wvl <= hi) & np.isfinite(rfl)
@@ -468,13 +1075,50 @@ def noise_index(wvl, rfl, lo=500.0, hi=1350.0):
     return float(np.median(np.abs(d2)) / np.nanmedian(r))
 
 
-def has_vnir_coverage(wvl, rfl, lo=750.0, hi=1000.0, min_points=10):
+def has_vnir_coverage(
+    wvl: npt.ArrayLike, rfl: npt.ArrayLike, lo: float = 750.0, hi: float = 1000.0, min_points: int = 10
+) -> bool:
+    """
+    True if a spectrum has at least ``min_points`` finite samples in [lo, hi] nm.
+
+    Parameters
+    ----------
+    wvl : array_like
+        Wavelengths in nm.
+    rfl : array_like
+        Reflectance.
+    lo, hi : float, optional
+        Window in nm (default covers the ~900 nm Fe3+ band).
+    min_points : int, optional
+        Required number of finite samples.
+
+    Returns
+    -------
+    bool
+    """
     wvl = np.asarray(wvl, dtype=float)
     rfl = np.asarray(rfl, dtype=float)
     return int(((wvl >= lo) & (wvl <= hi) & np.isfinite(rfl)).sum()) >= min_points
 
 
-def classify_minerals(text):
+def classify_minerals(text: str) -> set[str]:
+    """
+    Identify target minerals named in a reference-spectrum label.
+
+    Matching is case-insensitive substring search, so e.g. "natrojarosite"
+    counts as jarosite. Paracoquimbite is not counted as coquimbite.
+
+    Parameters
+    ----------
+    text : str
+        File name, header line or metadata text.
+
+    Returns
+    -------
+    set of str
+        Lower-case mineral keys found; a single-element set marks a pure
+        reference.
+    """
     t = text.lower()
     found = set()
     if 'ferricopiapite' in t:
@@ -496,12 +1140,44 @@ def classify_minerals(text):
     return found
 
 
-def read_crowley(path):
+def read_crowley(path: str) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Read a Crowley reference spectrum (two whitespace columns, wavelength in µm).
+
+    Parameters
+    ----------
+    path : str
+        Text file path.
+
+    Returns
+    -------
+    wvl : np.ndarray
+        Wavelengths in nm.
+    rfl : np.ndarray
+        Reflectance.
+    """
     df = pd.read_csv(path, sep=r'\s+', header=None, names=['w', 'r'])
     return df['w'].values * 1000.0, df['r'].values.astype(float)
 
 
-def read_usgs(path, s07_wvl):
+def read_usgs(path: str, s07_wvl: np.ndarray) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """
+    Read a USGS splib07 ASD-resampled spectrum (one header line, one value per line).
+
+    Parameters
+    ----------
+    path : str
+        Text file path.
+    s07_wvl : np.ndarray
+        Shared 2151-channel ASD wavelength grid in nm.
+
+    Returns
+    -------
+    wvl, rfl : np.ndarray or None
+        Wavelengths (copy of ``s07_wvl``) and reflectance with USGS "deleted"
+        values (< -1) set to NaN; ``(None, None)`` if the channel count does
+        not match ``s07_wvl``.
+    """
     rfl = pd.read_csv(path, skiprows=1, header=None)[0].values.astype(float)
     rfl[rfl < -1] = np.nan
     if len(rfl) != len(s07_wvl):
@@ -509,7 +1185,21 @@ def read_usgs(path, s07_wvl):
     return s07_wvl.copy(), rfl
 
 
-def read_relab(path):
+def read_relab(path: str) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Read a RELAB ``.tab`` spectrum; non-numeric lines are skipped.
+
+    Parameters
+    ----------
+    path : str
+        Text file path; first two whitespace columns are wavelength (nm) and
+        reflectance.
+
+    Returns
+    -------
+    wvl, rfl : np.ndarray
+        Rows with 0 < wavelength < 1e5.
+    """
     w, r = [], []
     with open(path) as fh:
         for ln in fh:
@@ -526,7 +1216,20 @@ def read_relab(path):
     return np.asarray(w), np.asarray(r)
 
 
-def usgs_header_name(path):
+def usgs_header_name(path: str) -> str:
+    """
+    Sample description from a USGS file's first line (text after the first ':').
+
+    Parameters
+    ----------
+    path : str
+        USGS spectrum file.
+
+    Returns
+    -------
+    str
+        Header description, or the file stem if the header has no ':'.
+    """
     with open(path) as fh:
         header = fh.readline().strip()
     if ':' in header:
@@ -534,7 +1237,21 @@ def usgs_header_name(path):
     return os.path.splitext(os.path.basename(path))[0]
 
 
-def relab_xml_name(tab_path):
+def relab_xml_name(tab_path: str) -> tuple[str, str]:
+    """
+    Mineral subtype and specimen name from the PDS4 label next to a RELAB file.
+
+    Parameters
+    ----------
+    tab_path : str
+        Path to the ``.tab`` file; the label is the same path with ``.xml``.
+
+    Returns
+    -------
+    subtype, name : str
+        Contents of ``speclib:mineral_subtype`` and ``speclib:specimen_name``
+        (empty strings if absent).
+    """
     xml = tab_path[:-4] + '.xml'
     sub = name = ''
     if os.path.exists(xml):
@@ -546,9 +1263,22 @@ def relab_xml_name(tab_path):
     return sub, name
 
 
-def load_reference_spectra():
+def load_reference_spectra() -> list[dict[str, Any]]:
+    """
+    Load the Crowley, USGS and RELAB libraries and keep pure target-mineral spectra.
+
+    A spectrum is kept if its label names exactly one mineral in
+    ``MINERAL_KEYS``, it has VNIR coverage (``has_vnir_coverage``), and, for
+    USGS only, its ``noise_index`` does not exceed ``NOISE_THRESHOLD``.
+
+    Returns
+    -------
+    list of dict
+        Records with keys ``wvl`` (nm), ``rfl``, ``mineral``, ``is_pure`` and
+        ``library``.
+    """
     s07 = pd.read_csv(
-        f'{REF_DIR}/usgs_minerals/s07_ASD_Wavelengths_ASD_0.35-2.5_microns_2151_ch.txt',
+        USGS_WAVELENGTH_FILE,
         skiprows=1, header=None)[0].values.astype(float) * 1000.0
     records = []
     for path in sorted(glob.glob(f'{REF_DIR}/crowley/*.txt')):
@@ -583,7 +1313,31 @@ def load_reference_spectra():
     return [r for r in kept if r['is_pure'] and r['mineral'] in MINERAL_KEYS]
 
 
-def mean_endmember_on_grid(pure_refs, dst_wvl, dst_fwhm=None):
+def mean_endmember_on_grid(
+    pure_refs: list[dict[str, Any]], dst_wvl: npt.ArrayLike, dst_fwhm: npt.ArrayLike | None = None
+) -> np.ndarray:
+    """
+    Average all reference spectra of each mineral onto a sensor's band grid.
+
+    Each reference is resampled (Gaussian convolution if ``dst_fwhm`` is
+    given, else linear interpolation), water-vapor masked and
+    max-normalized; the per-mineral mean is then re-normalized.
+
+    Parameters
+    ----------
+    pure_refs : list of dict
+        Output of ``load_reference_spectra``.
+    dst_wvl : array_like
+        Target band centers in nm, shape (n_bands,).
+    dst_fwhm : array_like, optional
+        Target band FWHM in nm, shape (n_bands,).
+
+    Returns
+    -------
+    np.ndarray
+        Endmembers, shape (n_minerals, n_bands), ordered as ``MINERALS``. A row
+        is all NaN if no reference of that mineral has >= 10 valid bands.
+    """
     dst_wvl = np.asarray(dst_wvl, dtype=float)
     members = np.full((len(MINERAL_KEYS), len(dst_wvl)), np.nan)
     for i, mineral in enumerate(MINERAL_KEYS):
@@ -611,7 +1365,29 @@ def mean_endmember_on_grid(pure_refs, dst_wvl, dst_fwhm=None):
     return members
 
 
-def window_for_bounds(transform, n_rows, n_cols, xmin, ymin, xmax, ymax):
+# ---------------------------------------------------------------------------
+# Raster helpers
+# ---------------------------------------------------------------------------
+def window_for_bounds(
+    transform: Affine, n_rows: int, n_cols: int, xmin: float, ymin: float, xmax: float, ymax: float
+) -> tuple[int, int, int, int]:
+    """
+    Row/column slice bounds of a raster covering a map-coordinate box.
+
+    Parameters
+    ----------
+    transform : rasterio.transform.Affine
+        Raster pixel-to-map transform.
+    n_rows, n_cols : int
+        Raster size (used to clamp the window).
+    xmin, ymin, xmax, ymax : float
+        Box in the raster's CRS.
+
+    Returns
+    -------
+    r0, r1, c0, c1 : int
+        Half-open slice bounds ``[r0:r1, c0:c1]``.
+    """
     rc = [rowcol(transform, x, y) for x, y in (
         (xmin, ymax), (xmax, ymax), (xmin, ymin), (xmax, ymin))]
     rows = [r for r, _ in rc]
@@ -621,18 +1397,76 @@ def window_for_bounds(transform, n_rows, n_cols, xmin, ymin, xmax, ymax):
     return r0, r1, c0, c1
 
 
-def inside_mask(geoms, shape, transform):
+def inside_mask(geoms: list[dict[str, Any]], shape: tuple[int, int], transform: Affine) -> np.ndarray:
+    """
+    Boolean raster that is True for pixels whose center falls inside ``geoms``.
+
+    Parameters
+    ----------
+    geoms : list of dict
+        GeoJSON-like geometries in the raster's CRS.
+    shape : tuple of int
+        Output (n_rows, n_cols).
+    transform : rasterio.transform.Affine
+        Raster pixel-to-map transform.
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask, shape ``shape``.
+    """
     return geometry_mask(geoms, out_shape=shape, transform=transform, invert=True)
 
 
-def map_classes(wvl, cube, mask, classify):
+def map_classes(
+    wvl: np.ndarray, cube: np.ndarray, mask: np.ndarray, classify: Callable[[np.ndarray], int]
+) -> np.ndarray:
+    """
+    Apply a per-spectrum classifier to every masked pixel of a cube.
+
+    Parameters
+    ----------
+    wvl : np.ndarray
+        Band centers (unused; kept for a uniform call signature).
+    cube : np.ndarray
+        Reflectance cube, shape (n_rows, n_cols, n_bands).
+    mask : np.ndarray
+        Boolean AOI mask, shape (n_rows, n_cols).
+    classify : callable
+        Function mapping a spectrum (n_bands,) to a class id.
+
+    Returns
+    -------
+    np.ndarray
+        uint8 class map, shape (n_rows, n_cols); 0 outside the mask.
+    """
     cls = np.zeros(mask.shape, dtype=np.uint8)
     for i, j in zip(*np.where(mask)):
         cls[i, j] = classify(cube[i, j])
     return cls
 
 
-def nnls_cube(wvl, cube, mask, members):
+def nnls_cube(wvl: np.ndarray, cube: np.ndarray, mask: np.ndarray, members: np.ndarray) -> np.ndarray:
+    """
+    NNLS abundances for every masked pixel of a cube.
+
+    Parameters
+    ----------
+    wvl : np.ndarray
+        Band centers in nm, shape (n_bands,).
+    cube : np.ndarray
+        Reflectance cube, shape (n_rows, n_cols, n_bands).
+    mask : np.ndarray
+        Boolean AOI mask, shape (n_rows, n_cols).
+    members : np.ndarray
+        Endmembers, shape (n_minerals, n_bands).
+
+    Returns
+    -------
+    np.ndarray
+        Abundance cube, shape (n_rows, n_cols, n_minerals); NaN outside the
+        mask.
+    """
     abund = np.full(mask.shape + (len(MINERAL_KEYS),), np.nan, dtype=float)
     if mask.any():
         specs = cube[mask].astype(float)
@@ -641,7 +1475,28 @@ def nnls_cube(wvl, cube, mask, members):
     return abund
 
 
-def share_rows(ids, method, source):
+# ---------------------------------------------------------------------------
+# Summary tables
+# ---------------------------------------------------------------------------
+def share_rows(ids: npt.ArrayLike, method: str, source: str) -> list[dict[str, Any]]:
+    """
+    Per-class pixel counts and percentages for one method/source combination.
+
+    Parameters
+    ----------
+    ids : array_like
+        Class ids for every pixel (or pit) considered.
+    method : str
+        Classifier label, e.g. ``'SAM'``.
+    source : str
+        Data source label, e.g. ``'EMIT'``.
+
+    Returns
+    -------
+    list of dict
+        One row per class (Unclassified + each mineral) with ``count``,
+        ``n_total``, ``n_classified``, ``pct_total`` and ``pct_classified``.
+    """
     ids = np.asarray(ids, dtype=int).ravel()
     ids[ids == UNCONFIRMED_ID] = 0
     n = ids.size
@@ -658,7 +1513,20 @@ def share_rows(ids, method, source):
     return rows
 
 
-def class_count_table(rows):
+def class_count_table(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    """
+    Pivot ``share_rows`` output into one row per method/source with class counts.
+
+    Parameters
+    ----------
+    rows : list of dict
+        Concatenated ``share_rows`` output.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns ``method``, ``source``, ``n`` and one count column per class.
+    """
     df = pd.DataFrame(rows)
     names = ['Unclassified'] + MINERAL_NAMES
     out = []
@@ -670,7 +1538,39 @@ def class_count_table(rows):
     return pd.DataFrame(out)
 
 
-def jarosite_window_counts(wvl, cube, mask, class_grid, window, polyord):
+def jarosite_window_counts(
+    wvl: np.ndarray, cube: np.ndarray, mask: np.ndarray, class_grid: np.ndarray, window: int, polyord: int
+) -> dict[str, int]:
+    """
+    Explain why pixels with a jarosite-like NIR band were or were not called jarosite.
+
+    Considers AOI pixels whose ~900 nm band center lies in 910-940 nm and
+    tallies whether the 2230-2290 nm feature passed the jarosite test, fell
+    outside the 2255-2275 nm window (short or long side), or was too shallow.
+
+    Parameters
+    ----------
+    wvl : np.ndarray
+        Band centers in nm.
+    cube : np.ndarray
+        Reflectance cube, shape (n_rows, n_cols, n_bands).
+    mask : np.ndarray
+        Boolean AOI mask.
+    class_grid : np.ndarray
+        Decision-tree class map for the same cube.
+    window, polyord : int
+        Savitzky-Golay settings.
+
+    Returns
+    -------
+    dict
+        ``n_aoi`` AOI pixels; ``n_unclass`` unclassified pixels; ``n_window``
+        pixels with b900 in 910-940 nm; ``n_pass`` classified jarosite;
+        ``n_reject`` = ``n_out`` (2.2 µm band present but outside 2255-2275 nm,
+        split into ``n_out_short``/``n_out_long``) + ``n_shallow`` (band depth
+        <= 0.01 or absent; ``n_shallow_in_win`` of those were centered in the
+        window).
+    """
     n_pass = n_out = n_shallow = n_out_short = n_out_long = n_shallow_in_win = 0
     for i, j in zip(*np.where(mask)):
         spec = np.asarray(cube[i, j], dtype=float).copy()
@@ -710,7 +1610,22 @@ def jarosite_window_counts(wvl, cube, mask, class_grid, window, polyord):
     )
 
 
-def load_asd():
+# ---------------------------------------------------------------------------
+# Data loaders
+# ---------------------------------------------------------------------------
+def load_asd() -> dict[str, pd.DataFrame]:
+    """
+    Load ASD field spectra from ``ASD_DIR``.
+
+    Each ``*.txt`` file must be whitespace-delimited with a header row that
+    includes ``Wavelength`` (nm) and ``Reflectance`` columns. Files with
+    ``POW`` in the name are skipped.
+
+    Returns
+    -------
+    dict of str to pd.DataFrame
+        File stem -> table.
+    """
     samples = {}
     for path in sorted(glob.glob(f'{ASD_DIR}/*.txt')):
         name = os.path.splitext(os.path.basename(path))[0]
@@ -720,7 +1635,25 @@ def load_asd():
     return samples
 
 
-def load_emit():
+def load_emit() -> tuple[np.ndarray, np.ndarray, np.ndarray, xr.DataArray]:
+    """
+    Load the orthorectified EMIT reflectance subset.
+
+    Expects variable ``reflectance`` with dimensions
+    (``wavelengths``, ``latitude``, ``longitude``) in any order, plus
+    ``wavelengths`` and ``fwhm`` variables; -9999 is treated as fill.
+
+    Returns
+    -------
+    wvl : np.ndarray
+        Band centers in nm, shape (n_bands,).
+    fwhm : np.ndarray
+        Band FWHM in nm, shape (n_bands,).
+    data : np.ndarray
+        Reflectance, shape (n_bands, n_lat, n_lon), fill set to NaN.
+    refl : xr.DataArray
+        The reflectance DataArray (fill not masked), kept for its coordinates.
+    """
     ds = xr.open_dataset(EMIT_PATH)
     refl = ds['reflectance']
     if refl.dims != ('wavelengths', 'latitude', 'longitude'):
@@ -732,7 +1665,23 @@ def load_emit():
     return wvl, fwhm, data, refl
 
 
-def load_aviris():
+def load_aviris() -> tuple[np.ndarray, np.ndarray, np.ndarray, CRS, Affine]:
+    """
+    Load the AVIRIS ENVI reflectance image, sorted by wavelength.
+
+    Returns
+    -------
+    wvl : np.ndarray
+        Band centers in nm, rounded to integers, ascending.
+    fwhm : np.ndarray
+        Band FWHM in nm from the header ``fwhm`` field, or 10 nm if absent.
+    data : np.ndarray
+        Raw values, shape (n_rows, n_cols, n_bands) (not yet scaled).
+    crs : rasterio.crs.CRS
+        Image CRS.
+    transform : rasterio.transform.Affine
+        Pixel-to-map transform.
+    """
     img = spectral.open_image(AVIRIS_HDR)
     data = img.load()
     wvl = np.array(img.bands.centers, dtype=float)
@@ -748,7 +1697,23 @@ def load_aviris():
     return wvl, fwhm, data, crs, transform
 
 
-def load_aviris5():
+def load_aviris5() -> tuple[np.ndarray, np.ndarray, xr.DataArray]:
+    """
+    Load the AVIRIS-5 reflectance NetCDF.
+
+    Expects root variables ``easting`` and ``northing`` (UTM 12N meters) and a
+    ``reflectance`` group holding ``reflectance`` with dimensions
+    (band, ``northing``, ``easting``), ``wavelength`` and ``fwhm``.
+
+    Returns
+    -------
+    wvl : np.ndarray
+        Band centers in nm, rounded to integers.
+    fwhm : np.ndarray
+        Band FWHM in nm.
+    refl : xr.DataArray
+        Reflectance with easting/northing coordinates attached.
+    """
     root = xr.open_dataset(AVIRIS5_PATH)
     refl_ds = xr.open_dataset(AVIRIS5_PATH, group='reflectance')
     wvl = np.round(refl_ds['wavelength'].values.astype(float))
@@ -758,14 +1723,77 @@ def load_aviris5():
     return wvl, fwhm, refl
 
 
-def aoi_mean(cube, mask):
+def aoi_mean(cube: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """
+    NaN-aware mean spectrum of the masked pixels.
+
+    Parameters
+    ----------
+    cube : np.ndarray
+        Reflectance cube, shape (n_rows, n_cols, n_bands).
+    mask : np.ndarray
+        Boolean AOI mask, shape (n_rows, n_cols).
+
+    Returns
+    -------
+    np.ndarray
+        Mean spectrum, shape (n_bands,); all NaN if the mask is empty.
+    """
     if not mask.any():
         return np.full(cube.shape[-1], np.nan)
     return np.nanmean(cube[mask].astype(float), axis=0)
 
 
-def main():
+def check_inputs() -> None:
+    """
+    Fail fast if required inputs are missing from the working directory.
+
+    Raises
+    ------
+    FileNotFoundError
+        Listing every missing file/directory, or if no ASD file matches a
+        name in ``PITS``.
+    """
+    required = [ASD_DIR, EMIT_PATH, AVIRIS_HDR, AVIRIS5_PATH, AOI_PATH,
+                USGS_WAVELENGTH_FILE, f'{REF_DIR}/crowley', f'{REF_DIR}/relab']
+    missing = [p for p in required if not os.path.exists(p)]
+    if missing:
+        raise FileNotFoundError(
+            f'Missing inputs (relative to {os.getcwd()}): {", ".join(missing)}. '
+            'Run from the repository root; see README.md for the expected layout.')
+    found = [k for k in PITS if os.path.exists(f'{ASD_DIR}/{k}.txt')]
+    if not found:
+        raise FileNotFoundError(
+            f'No ASD spectra in {ASD_DIR} match the PITS names (e.g. {next(iter(PITS))}.txt).')
+    absent = sorted(set(PITS) - set(found))
+    if absent:
+        logger.warning('ASD spectra missing for %s; these pits are skipped', ', '.join(absent))
+
+
+# ---------------------------------------------------------------------------
+# Pipeline
+# ---------------------------------------------------------------------------
+def main() -> None:
+    """
+    Run the full analysis and write the summary tables to ``OUT_DIR``.
+
+    Outputs
+    -------
+    band_params.csv
+        Band parameters per pit/source and for AOI-mean spectra.
+    band_params_by_source.csv
+        Mean and std of each band parameter across pits, per source.
+    jarosite_window.csv
+        Jarosite decision-tree diagnostics per sensor.
+    class_shares.csv
+        Per-class counts/percentages for SAM, decision tree and NNLS.
+    nnls_mean_abundance.csv
+        Mean NNLS abundance per mineral and source.
+    """
+    check_inputs()
     os.makedirs(OUT_DIR, exist_ok=True)
+
+    # --- Load inputs -------------------------------------------------------
     asd = load_asd()
     wvl_emit, fwhm_emit, emit_cube_full, emit_refl = load_emit()
     wvl_av, fwhm_av, aviris_data, aviris_crs, aviris_transform = load_aviris()
@@ -773,6 +1801,7 @@ def main():
     aoi = gpd.read_file(AOI_PATH)
     pure_refs = load_reference_spectra()
 
+    # --- Pit spectra: ASD, co-located EMIT pixel, ASD convolved to EMIT ----
     to_wgs = Transformer.from_crs(UTM, 'EPSG:4326', always_xy=True)
     lat_vals = emit_refl.latitude.values
     lon_vals = emit_refl.longitude.values
@@ -783,12 +1812,14 @@ def main():
         if key not in asd:
             continue
         lon_s, lat_s = to_wgs.transform(east, north)
+        # Nearest EMIT grid cell (no check that the pit lies inside the scene).
         lat_i = int(np.argmin(np.abs(lat_vals - lat_s)))
         lon_i = int(np.argmin(np.abs(lon_vals - lon_s)))
         emit_pix = emit_cube_full[:, lat_i, lon_i].astype(float)
         df = asd[key]
         asd_wvl = df['Wavelength'].values.astype(float)
         asd_rfl = df['Reflectance'].values.astype(float)
+        # Put all pits on the first pit's ASD wavelength grid.
         if wavelengths_asd is None:
             wavelengths_asd = asd_wvl.copy()
         elif len(asd_wvl) != len(wavelengths_asd) or not np.allclose(asd_wvl, wavelengths_asd):
@@ -797,6 +1828,7 @@ def main():
         key_b = asd_wvl.tobytes()
         if key_b not in resamplers:
             resamplers[key_b] = BandResampler(asd_wvl, wvl_emit, fwhm1=None, fwhm2=fwhm_emit)
+        # Fill gaps before resampling so NaNs don't spread into EMIT bands.
         bad = ~np.isfinite(asd_rfl)
         rfl_filled = asd_rfl.copy()
         if bad.any() and (~bad).sum() > 1:
@@ -811,6 +1843,7 @@ def main():
             asd_emit_wvl=wvl_emit, asd_emit_rfl=asd_emit,
         )
 
+    # --- Pit spectra: co-located AVIRIS and AVIRIS-5 pixels ----------------
     n_rows, n_cols = aviris_data.shape[:2]
     to_aviris = Transformer.from_crs(UTM, aviris_crs, always_xy=True)
     av5_east = av5_refl.easting.values
@@ -821,6 +1854,7 @@ def main():
         if 0 <= row < n_rows and 0 <= col < n_cols:
             pix = scale_aviris_reflectance(aviris_data[row, col, :])
             pix[(wvl_av < 350) | (wvl_av > 2500)] = np.nan
+            # Give the AVIRIS pit spectrum the same band gaps as its EMIT pixel.
             pix[~nearest_emit_valid_mask(wvl_av, pit['emit_wvl'], pit['emit_rfl'])] = np.nan
             pit['aviris_wvl'] = wvl_av
             pit['aviris_rfl'] = pix
@@ -832,8 +1866,10 @@ def main():
         pit['av5_wvl'] = wvl_av5
         pit['av5_rfl'] = av5_pix
 
+    # --- AOI subsets and inside-polygon masks for each sensor --------------
     mine = aoi.to_crs(UTM)
     bounds = mine.total_bounds
+    # AVIRIS read window: AOI plus pits, padded 30 m (plus 50 m more to the east).
     buf, east_extra = 30.0, 50.0
     pit_e = [p['east'] for p in pits.values()]
     pit_n = [p['north'] for p in pits.values()]
@@ -842,6 +1878,7 @@ def main():
     ymin = min(bounds[1], min(pit_n)) - buf
     ymax = max(bounds[3], max(pit_n)) + buf
 
+    # AVIRIS-5: clip to the AOI bounding box + 30 m, then rasterize the AOI.
     clip = box(bounds[0] - buf, bounds[1] - buf, bounds[2] + buf, bounds[3] + buf)
     av5_view = (av5_refl
                 .rio.set_spatial_dims(x_dim='easting', y_dim='northing', inplace=False)
@@ -853,6 +1890,7 @@ def main():
         (av5_view.sizes['northing'], av5_view.sizes['easting']),
         av5_view.rio.transform())
 
+    # AVIRIS: read the window, scale to unit reflectance, rasterize the AOI.
     r0, r1, c0, c1 = window_for_bounds(
         aviris_transform, n_rows, n_cols, xmin, ymin, xmax, ymax)
     av_win = np.asarray(aviris_data[r0:r1, c0:c1, :], dtype=float)
@@ -863,6 +1901,7 @@ def main():
         [mapping(g) for g in aoi.to_crs(aviris_crs).geometry],
         (n_rows, n_cols), aviris_transform)[r0:r1, c0:c1]
 
+    # EMIT: already cropped; rasterize the AOI on the lat/lon grid.
     emit_geo = (emit_refl
                 .rio.set_spatial_dims(x_dim='longitude', y_dim='latitude', inplace=False)
                 .rio.write_crs('EPSG:4326', inplace=False))
@@ -873,11 +1912,13 @@ def main():
     emit_cube = np.moveaxis(emit_geo.values.astype(float), 0, -1)
     emit_cube[emit_cube == -9999] = np.nan
 
+    # --- Mean reference endmembers on each sensor's band grid --------------
     members_emit = mean_endmember_on_grid(pure_refs, wvl_emit, fwhm_emit)
     members_av5 = mean_endmember_on_grid(pure_refs, wvl_av5, fwhm_av5)
     members_av = mean_endmember_on_grid(pure_refs, wvl_av, fwhm_av)
     members_asd = mean_endmember_on_grid(pure_refs, wavelengths_asd)
 
+    # --- Band parameters: every pit x source, plus AOI-mean spectra --------
     param_rows = []
     for key, pit in pits.items():
         for source, wvl_key, rfl_key in (
@@ -927,12 +1968,14 @@ def main():
     summary_df.to_csv(f'{OUT_DIR}/band_params_by_source.csv', index=False, float_format='%.4f')
     print(summary_df.to_string(index=False))
 
+    # --- Decision-tree classification --------------------------------------
     emit_w, emit_p = SG['emit']
     av_w, av_p = SG['aviris']
     av5_w, av5_p = SG['aviris5']
 
-    def tree_pixel(wvl, window, poly):
-        def classify(spec):
+    def tree_pixel(wvl: np.ndarray, window: int, poly: int) -> Callable[[np.ndarray], int]:
+        """Build a per-pixel decision-tree classifier for one sensor."""
+        def classify(spec: np.ndarray) -> int:
             spec = np.asarray(spec, dtype=float).copy()
             spec[~np.isfinite(spec) | (spec <= 0)] = np.nan
             return refined_class_from_spectrum(wvl, spec, window, poly)
@@ -956,6 +1999,7 @@ def main():
     tree_counts += share_rows(av5_tree[av5_inside], 'Decision tree', 'AVIRIS-5')
     print(class_count_table(tree_counts).to_string(index=False))
 
+    # --- Jarosite branch diagnostics ---------------------------------------
     jaro_rows = []
     for source, wvl, cube, mask, grid, window, poly in (
         ('EMIT', wvl_emit, emit_cube, emit_inside, emit_tree, emit_w, emit_p),
@@ -969,8 +2013,10 @@ def main():
     jaro_df.to_csv(f'{OUT_DIR}/jarosite_window.csv')
     print(jaro_df.to_string())
 
-    def sam_pixel(wvl, members):
-        def classify(spec):
+    # --- SAM and NNLS classification ---------------------------------------
+    def sam_pixel(wvl: np.ndarray, members: np.ndarray) -> Callable[[np.ndarray], int]:
+        """Build a per-pixel SAM classifier for one sensor."""
+        def classify(spec: np.ndarray) -> int:
             return sam_class_from_spectrum(wvl, spec, members)
         return classify
 
@@ -990,6 +2036,7 @@ def main():
     emit_nnls = class_from_abund_cube(emit_abund)
     asd_nnls = [nnls_class_from_abundance(row) for row in asd_abund]
 
+    # --- Class-share table across all methods and sources ------------------
     share = []
     share += share_rows(asd_sam, 'SAM', 'ASD')
     share += share_rows(emit_sam[emit_inside], 'SAM', 'EMIT')
@@ -1007,6 +2054,7 @@ def main():
     share_df.to_csv(f'{OUT_DIR}/class_shares.csv', index=False, float_format='%.4f')
     print(class_count_table(share).to_string(index=False))
 
+    # --- Mean NNLS abundance per mineral and source ------------------------
     abund_rows = []
     for source, abund, mask in (
         ('ASD', asd_abund, None),
@@ -1029,4 +2077,5 @@ def main():
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     main()
