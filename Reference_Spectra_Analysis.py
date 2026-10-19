@@ -40,11 +40,11 @@ if _missing:
         'Run from the repository root; see README.md for the expected layout.')
 
 # NOTE (review): this script and Iron_King_Analysis.py prepare the library
-# differently. Here, Crowley "paracoquimbite" is counted as coquimbite, USGS
-# spectra are not noise-filtered, and continuum removal does not mask the
-# water-vapor windows or non-positive values. The decision-tree windows are
-# therefore derived from slightly different spectra than those used for the
-# SAM/NNLS endmembers.
+# differently. Here, Crowley "paracoquimbite" is counted as coquimbite, and
+# continuum removal does not mask the water-vapor windows or non-positive
+# values. The decision-tree windows are therefore derived from slightly
+# different spectra than those used for the SAM/NNLS endmembers. USGS spectra
+# with a noise index above 2e-4 were removed from the library by hand.
 
 
 def continuum_removal(refl: np.ndarray, wavelengths: np.ndarray) -> np.ndarray:

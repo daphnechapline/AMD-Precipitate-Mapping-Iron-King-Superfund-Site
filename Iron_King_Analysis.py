@@ -84,8 +84,6 @@ OUT_DIR = 'outputs'
 BAD_WAVELENGTH_WINDOWS = [(1275, 1475), (1750, 1975)]
 # SAM pixels whose best spectral angle exceeds this (radians) are unclassified.
 SAM_MAX_ANGLE_RAD = 0.2
-# USGS reference spectra with a noise index above this are discarded.
-NOISE_THRESHOLD = 2e-4
 # WGS 84 / UTM zone 12N; pit coordinates and AVIRIS-5 grid are in this CRS.
 UTM = 'EPSG:32612'
 
@@ -909,37 +907,6 @@ def class_from_abund_cube(abund: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Reference spectral library
 # ---------------------------------------------------------------------------
-def noise_index(wvl: npt.ArrayLike, rfl: npt.ArrayLike, lo: float = 500.0, hi: float = 1350.0) -> float:
-    """
-    Relative high-frequency noise of a spectrum.
-
-    Median absolute second difference divided by median reflectance within
-    ``[lo, hi]`` nm.
-
-    Parameters
-    ----------
-    wvl : array_like
-        Wavelengths in nm.
-    rfl : array_like
-        Reflectance.
-    lo, hi : float, optional
-        Evaluation window in nm.
-
-    Returns
-    -------
-    float
-        Noise index, or NaN if fewer than 20 finite samples are in the window.
-    """
-    wvl = np.asarray(wvl, dtype=float)
-    rfl = np.asarray(rfl, dtype=float)
-    m = (wvl >= lo) & (wvl <= hi) & np.isfinite(rfl)
-    r = rfl[m]
-    if r.size < 20:
-        return np.nan
-    d2 = r[2:] - 2.0 * r[1:-1] + r[:-2]
-    return float(np.median(np.abs(d2)) / np.nanmedian(r))
-
-
 def has_vnir_coverage(
     wvl: npt.ArrayLike, rfl: npt.ArrayLike, lo: float = 750.0, hi: float = 1000.0, min_points: int = 10
 ) -> bool:
@@ -1133,8 +1100,9 @@ def load_reference_spectra() -> list[dict[str, Any]]:
     Load the Crowley, USGS and RELAB libraries and keep pure target-mineral spectra.
 
     A spectrum is kept if its label names exactly one mineral in
-    ``MINERAL_KEYS``, it has VNIR coverage (``has_vnir_coverage``), and, for
-    USGS only, its ``noise_index`` does not exceed ``NOISE_THRESHOLD``.
+    ``MINERAL_KEYS`` and it has VNIR coverage (``has_vnir_coverage``). USGS
+    spectra with a noise index above 2e-4 were removed from the library by
+    hand and are not filtered here.
 
     Returns
     -------
@@ -1168,13 +1136,7 @@ def load_reference_spectra() -> list[dict[str, Any]]:
         mins = classify_minerals(f'{sub} {name}')
         records.append(dict(wvl=w, rfl=r, mineral=(next(iter(mins)) if len(mins) == 1 else None),
                             is_pure=len(mins) == 1, library='relab'))
-    kept = []
-    for rec in records:
-        noisy = (rec['library'] == 'usgs'
-                 and np.isfinite(noise_index(rec['wvl'], rec['rfl']))
-                 and noise_index(rec['wvl'], rec['rfl']) > NOISE_THRESHOLD)
-        if has_vnir_coverage(rec['wvl'], rec['rfl']) and not noisy:
-            kept.append(rec)
+    kept = [rec for rec in records if has_vnir_coverage(rec['wvl'], rec['rfl'])]
     return [r for r in kept if r['is_pure'] and r['mineral'] in MINERAL_KEYS]
 
 
