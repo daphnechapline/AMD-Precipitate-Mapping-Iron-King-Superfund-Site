@@ -630,16 +630,16 @@ def refined_mineral_class(params: dict[str, Any]) -> int:
     ==============  ===============  ==========================================
     b900 center     Class            Second test
     ==============  ===============  ==========================================
-    780-800 nm      1 Coquimbite     CR minimum 545-595 nm (500-600 window),
+    780-800 nm      1 Coquimbite     CR minimum 545-590 nm (500-600 window),
                                      and no rhomboclase band
-                    2 Rhomboclase    CR minimum 500-545 nm (450-550 window),
+                    2 Rhomboclase    CR minimum 500-550 nm (450-550 window),
                                      and no coquimbite band
     865-895 nm      3 Ferricopiapite band shoulder (b900_start) 660-695 nm
                     4 Hematite       band shoulder 725-755 nm
     910-940 nm      5 Jarosite       2230-2290 nm band centered 2255-2275 nm
     940-980 nm      6 Goethite       CR minimum 625-715 nm (600-750 window)
-                    7 Schwertmannite otherwise, band shoulder 710-755 nm
-    980-1020 nm     8 Ferrihydrite   band shoulder 750-785 nm
+                    7 Schwertmannite otherwise, band shoulder 710-750 nm
+    980-1010 nm     8 Ferrihydrite   band shoulder 755-780 nm
     ==============  ===============  ==========================================
 
     A center is stored only when its band is deeper than 0.01, so a missing
@@ -664,8 +664,8 @@ def refined_mineral_class(params: dict[str, Any]) -> int:
     if 780 <= b900 <= 800:
         d_coq, c_coq = cr_absorption_depth(cr, wvl, 500, 600)
         d_rho, c_rho = cr_absorption_depth(cr, wvl, 450, 550)
-        has_coq = np.isfinite(c_coq) and d_coq > 0.01 and 545 < c_coq <= 595
-        has_rho = np.isfinite(c_rho) and d_rho > 0.01 and 500 <= c_rho <= 545
+        has_coq = np.isfinite(c_coq) and d_coq > 0.01 and 545 <= c_coq <= 590
+        has_rho = np.isfinite(c_rho) and d_rho > 0.01 and 500 <= c_rho <= 550
         if has_coq and not has_rho:
             return 1
         if has_rho and not has_coq:
@@ -686,10 +686,10 @@ def refined_mineral_class(params: dict[str, Any]) -> int:
         d_goe, c_goe = cr_absorption_depth(cr, wvl, 600, 750)
         if np.isfinite(c_goe) and d_goe > 0.01 and 625 <= c_goe <= 715:
             return 6
-        if np.isfinite(b900_start) and 710 <= b900_start <= 755:
+        if np.isfinite(b900_start) and 710 <= b900_start <= 750:
             return 7
         return 0
-    if 980 <= b900 <= 1020 and np.isfinite(b900_start) and 750 <= b900_start <= 785:
+    if 980 <= b900 <= 1010 and np.isfinite(b900_start) and 755 <= b900_start <= 780:
         return 8
     return 0
 

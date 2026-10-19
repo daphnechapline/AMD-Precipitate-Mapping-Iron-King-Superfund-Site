@@ -145,14 +145,14 @@ nm band center, then confirmed with a second feature:
 
 | NIR band center | Class | Second test |
 |-----------------|-------|-------------|
-| 780–800 nm | Coquimbite | visible band at 545–595 nm, and no rhomboclase band |
-| | Rhomboclase | visible band at 500–545 nm, and no coquimbite band |
+| 780–800 nm | Coquimbite | visible band at 545–590 nm, and no rhomboclase band |
+| | Rhomboclase | visible band at 500–550 nm, and no coquimbite band |
 | 865–895 nm | Ferricopiapite | band shoulder at 660–695 nm |
 | | Hematite | band shoulder at 725–755 nm |
 | 910–940 nm | Jarosite | 2.2 µm band centered at 2255–2275 nm |
 | 940–980 nm | Goethite | band at 625–715 nm |
-| | Schwertmannite | otherwise, band shoulder at 710–755 nm |
-| 980–1020 nm | Ferrihydrite | band shoulder at 750–785 nm |
+| | Schwertmannite | otherwise, band shoulder at 710–750 nm |
+| 980–1010 nm | Ferrihydrite | band shoulder at 755–780 nm |
 
 These windows are hard-coded. They correspond to the statistics printed by
 `Reference_Spectra_Analysis.py` and need to be updated by hand if the
