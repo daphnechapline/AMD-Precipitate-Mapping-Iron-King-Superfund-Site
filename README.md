@@ -114,7 +114,6 @@ python Iron_King_Analysis.py           # full pipeline, writes outputs/
 |------|----------|
 | `band_params.csv` | Band parameters for each pit and source (`asd`, `emit`, `aviris`, `aviris5`, and `asd_emit`, which is ASD convolved to EMIT bands), plus the AOI-mean spectrum of each sensor. Column definitions are in the `compute_band_params` docstring. |
 | `band_params_by_source.csv` | Mean and standard deviation of each band parameter across the pits, per source. |
-| `jarosite_window.csv` | Diagnostics for the jarosite branch of the decision tree: how many pixels with a 910–940 nm band passed, or failed because the 2.26 µm band was off-window or too shallow. |
 | `class_shares.csv` | Pixel (or pit) counts and percentages per class for every method × source combination. |
 | `nnls_mean_abundance.csv` | Mean NNLS abundance per mineral and source. |
 

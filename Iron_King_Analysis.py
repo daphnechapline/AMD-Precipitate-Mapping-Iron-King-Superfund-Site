@@ -1538,78 +1538,6 @@ def class_count_table(rows: list[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(out)
 
 
-def jarosite_window_counts(
-    wvl: np.ndarray, cube: np.ndarray, mask: np.ndarray, class_grid: np.ndarray, window: int, polyord: int
-) -> dict[str, int]:
-    """
-    Explain why pixels with a jarosite-like NIR band were or were not called jarosite.
-
-    Considers AOI pixels whose ~900 nm band center lies in 910-940 nm and
-    tallies whether the 2230-2290 nm feature passed the jarosite test, fell
-    outside the 2255-2275 nm window (short or long side), or was too shallow.
-
-    Parameters
-    ----------
-    wvl : np.ndarray
-        Band centers in nm.
-    cube : np.ndarray
-        Reflectance cube, shape (n_rows, n_cols, n_bands).
-    mask : np.ndarray
-        Boolean AOI mask.
-    class_grid : np.ndarray
-        Decision-tree class map for the same cube.
-    window, polyord : int
-        Savitzky-Golay settings.
-
-    Returns
-    -------
-    dict
-        ``n_aoi`` AOI pixels; ``n_unclass`` unclassified pixels; ``n_window``
-        pixels with b900 in 910-940 nm; ``n_pass`` classified jarosite;
-        ``n_reject`` = ``n_out`` (2.2 µm band present but outside 2255-2275 nm,
-        split into ``n_out_short``/``n_out_long``) + ``n_shallow`` (band depth
-        <= 0.01 or absent; ``n_shallow_in_win`` of those were centered in the
-        window).
-    """
-    n_pass = n_out = n_shallow = n_out_short = n_out_long = n_shallow_in_win = 0
-    for i, j in zip(*np.where(mask)):
-        spec = np.asarray(cube[i, j], dtype=float).copy()
-        spec[~np.isfinite(spec) | (spec <= 0)] = np.nan
-        sm = smooth_pixel_spectrum(wvl, spec, window, polyord)
-        if sm is None:
-            continue
-        params = band_params_from_spectrum(wvl, sm)
-        if not params:
-            continue
-        b900 = params.get('b900_center', np.nan)
-        d900 = params.get('b900_depth', np.nan)
-        if not (np.isfinite(b900) and d900 > 0.01 and 910 <= b900 <= 940):
-            continue
-        if refined_mineral_class(params) == 5:
-            n_pass += 1
-            continue
-        d_sw, c_sw = cr_absorption_depth(params['cr'], params['wavelengths'], 2230, 2290)
-        if np.isfinite(c_sw) and d_sw > 0.01 and not (2255 <= c_sw <= 2275):
-            n_out += 1
-            if c_sw < 2255:
-                n_out_short += 1
-            else:
-                n_out_long += 1
-        else:
-            n_shallow += 1
-            if np.isfinite(c_sw) and 2255 <= c_sw <= 2275:
-                n_shallow_in_win += 1
-    n_aoi = int(mask.sum())
-    n_unclass = int(np.isin(class_grid[mask], [0, UNCONFIRMED_ID]).sum())
-    return dict(
-        n_aoi=n_aoi, n_unclass=n_unclass,
-        n_window=n_pass + n_out + n_shallow, n_pass=n_pass,
-        n_reject=n_out + n_shallow, n_out=n_out,
-        n_out_short=n_out_short, n_out_long=n_out_long,
-        n_shallow=n_shallow, n_shallow_in_win=n_shallow_in_win,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Data loaders
 # ---------------------------------------------------------------------------
@@ -1783,8 +1711,6 @@ def main() -> None:
         Band parameters per pit/source and for AOI-mean spectra.
     band_params_by_source.csv
         Mean and std of each band parameter across pits, per source.
-    jarosite_window.csv
-        Jarosite decision-tree diagnostics per sensor.
     class_shares.csv
         Per-class counts/percentages for SAM, decision tree and NNLS.
     nnls_mean_abundance.csv
@@ -1998,20 +1924,6 @@ def main() -> None:
     tree_counts += share_rows(av_tree[av_inside], 'Decision tree', 'AVIRIS')
     tree_counts += share_rows(av5_tree[av5_inside], 'Decision tree', 'AVIRIS-5')
     print(class_count_table(tree_counts).to_string(index=False))
-
-    # --- Jarosite branch diagnostics ---------------------------------------
-    jaro_rows = []
-    for source, wvl, cube, mask, grid, window, poly in (
-        ('EMIT', wvl_emit, emit_cube, emit_inside, emit_tree, emit_w, emit_p),
-        ('AVIRIS', wvl_av, av_win, av_inside, av_tree, av_w, av_p),
-        ('AVIRIS-5', wvl_av5, av5_cube, av5_inside, av5_tree, av5_w, av5_p),
-    ):
-        rec = jarosite_window_counts(wvl, cube, mask, grid, window, poly)
-        rec['source'] = source
-        jaro_rows.append(rec)
-    jaro_df = pd.DataFrame(jaro_rows).set_index('source')
-    jaro_df.to_csv(f'{OUT_DIR}/jarosite_window.csv')
-    print(jaro_df.to_string())
 
     # --- SAM and NNLS classification ---------------------------------------
     def sam_pixel(wvl: np.ndarray, members: np.ndarray) -> Callable[[np.ndarray], int]:
