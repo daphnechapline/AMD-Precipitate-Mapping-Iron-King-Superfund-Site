@@ -50,7 +50,6 @@ import geopandas as gpd
 import spectral
 from spectral import BandResampler
 from spectral.algorithms.algorithms import spectral_angles
-from scipy.signal import savgol_filter
 from pysptools.spectro import SpectrumConvexHullQuotient
 from pysptools.abundance_maps.amaps import NNLS
 from shapely.geometry import mapping, box
@@ -83,9 +82,6 @@ OUT_DIR = 'outputs'
 # ---------------------------------------------------------------------------
 # Atmospheric water-vapor windows (nm) set to NaN in every spectrum.
 BAD_WAVELENGTH_WINDOWS = [(1275, 1475), (1750, 1975)]
-# Savitzky-Golay smoothing switch; when False the SG settings below only set
-# the minimum number of valid bands a pixel needs (see smooth_pixel_spectrum).
-APPLY_SG_SMOOTH = False
 # SAM pixels whose best spectral angle exceeds this (radians) are unclassified.
 SAM_MAX_ANGLE_RAD = 0.2
 # USGS reference spectra with a noise index above this are discarded.
@@ -123,11 +119,12 @@ PITS = {
     'IK24-PIT-010': (385323, 3818149),
 }
 
-# Savitzky-Golay (window length, polynomial order) per sensor.
-SG = {
-    'emit': (7, 3),
-    'aviris': (13, 3),
-    'aviris5': (13, 3),
+# Minimum number of finite, positive bands (outside the water-vapor windows)
+# required before a spectrum is classified.
+MIN_VALID_BANDS = {
+    'emit': 11,
+    'aviris': 13,
+    'aviris5': 13,
 }
 
 # Decision-tree positions written to band_params.csv. A center is NaN when
@@ -596,44 +593,11 @@ def band_params_from_spectrum(
     return params
 
 
-def smooth_spectrum(vals: npt.ArrayLike, window: int, polyorder: int) -> np.ndarray:
-    """
-    Savitzky-Golay smooth the finite values of a spectrum.
-
-    Does nothing (returns a copy) when ``APPLY_SG_SMOOTH`` is False.
-
-    Parameters
-    ----------
-    vals : array_like
-        Spectrum, shape (n_bands,).
-    window : int
-        SG window length (bands).
-    polyorder : int
-        SG polynomial order.
-
-    Returns
-    -------
-    np.ndarray
-        Smoothed copy; NaNs are left in place.
-    """
-    out = np.asarray(vals, dtype=float).copy()
-    if not APPLY_SG_SMOOTH:
-        return out
-    mask = ~np.isnan(out)
-    if mask.sum() >= window:
-        out[mask] = savgol_filter(out[mask], window, polyorder)
-    return out
-
-
-def smooth_pixel_spectrum(
-    wvl: npt.ArrayLike, rfl: npt.ArrayLike, window: int, polyord: int
+def mask_spectrum(
+    wvl: npt.ArrayLike, rfl: npt.ArrayLike, min_valid: int
 ) -> np.ndarray | None:
     """
-    Mask, gap-fill, optionally smooth, then re-mask a pixel spectrum.
-
-    Invalid bands (water-vapor windows, non-finite, <= 0) are linearly
-    interpolated so the SG filter sees a continuous signal, then restored to
-    NaN after smoothing.
+    Mask water-vapor and non-positive bands.
 
     Parameters
     ----------
@@ -641,26 +605,20 @@ def smooth_pixel_spectrum(
         Band centers in nm, shape (n_bands,).
     rfl : array_like
         Reflectance, shape (n_bands,).
-    window : int
-        SG window length; also the minimum valid-band count (at least 11).
-    polyord : int
-        SG polynomial order.
+    min_valid : int
+        Minimum number of finite, positive bands required.
 
     Returns
     -------
     np.ndarray or None
-        Processed spectrum, or None if too few valid bands.
+        Masked spectrum, or None if fewer than ``min_valid`` bands remain.
     """
     wvl = np.asarray(wvl, dtype=float)
     rfl = apply_bad_wavelength_mask(wvl, rfl)
     valid = np.isfinite(rfl) & (rfl > 0)
-    if valid.sum() < max(window, 11):
+    if int(valid.sum()) < min_valid:
         return None
-    out = rfl.copy()
-    good, bad = np.where(valid)[0], np.where(~valid)[0]
-    if len(good) > 1 and len(bad):
-        out[bad] = np.interp(wvl[bad], wvl[good], rfl[good])
-    out = smooth_spectrum(out, window, polyord)
+    out = np.asarray(rfl, dtype=float).copy()
     out[~valid] = np.nan
     return out
 
@@ -778,7 +736,7 @@ def refined_mineral_class(params: dict[str, Any]) -> int:
 
 
 def refined_class_from_spectrum(
-    wvl: npt.ArrayLike, rfl: npt.ArrayLike, window: int, polyord: int
+    wvl: npt.ArrayLike, rfl: npt.ArrayLike, min_valid: int
 ) -> int:
     """
     Classify one reflectance spectrum with the decision tree.
@@ -789,15 +747,15 @@ def refined_class_from_spectrum(
         Band centers in nm.
     rfl : array_like
         Reflectance spectrum.
-    window, polyord : int
-        Savitzky-Golay settings passed to ``smooth_pixel_spectrum``.
+    min_valid : int
+        Minimum number of valid bands, passed to ``mask_spectrum``.
 
     Returns
     -------
     int
         Class id 0-8 (see ``refined_mineral_class``).
     """
-    sm = smooth_pixel_spectrum(wvl, rfl, window, polyord)
+    sm = mask_spectrum(wvl, rfl, min_valid)
     if sm is None:
         return 0
     # NOTE (review): uses the default b900_max=1300 nm, whereas the band
@@ -1852,27 +1810,26 @@ def main() -> None:
     print(summary_df.to_string(index=False))
 
     # --- Decision-tree classification --------------------------------------
-    emit_w, emit_p = SG['emit']
-    av_w, av_p = SG['aviris']
-    av5_w, av5_p = SG['aviris5']
-
-    def tree_pixel(wvl: np.ndarray, window: int, poly: int) -> Callable[[np.ndarray], int]:
+    def tree_pixel(wvl: np.ndarray, min_valid: int) -> Callable[[np.ndarray], int]:
         """Build a per-pixel decision-tree classifier for one sensor."""
         def classify(spec: np.ndarray) -> int:
             spec = np.asarray(spec, dtype=float).copy()
             spec[~np.isfinite(spec) | (spec <= 0)] = np.nan
-            return refined_class_from_spectrum(wvl, spec, window, poly)
+            return refined_class_from_spectrum(wvl, spec, min_valid)
         return classify
 
-    av5_tree = map_classes(wvl_av5, av5_cube, av5_inside, tree_pixel(wvl_av5, av5_w, av5_p))
-    av_tree = map_classes(wvl_av, av_win, av_inside, tree_pixel(wvl_av, av_w, av_p))
-    emit_tree = map_classes(wvl_emit, emit_cube, emit_inside, tree_pixel(wvl_emit, emit_w, emit_p))
+    av5_tree = map_classes(
+        wvl_av5, av5_cube, av5_inside, tree_pixel(wvl_av5, MIN_VALID_BANDS['aviris5']))
+    av_tree = map_classes(
+        wvl_av, av_win, av_inside, tree_pixel(wvl_av, MIN_VALID_BANDS['aviris']))
+    emit_tree = map_classes(
+        wvl_emit, emit_cube, emit_inside, tree_pixel(wvl_emit, MIN_VALID_BANDS['emit']))
     asd_emit_tree = [
-        refined_class_from_spectrum(p['asd_emit_wvl'], p['asd_emit_rfl'], emit_w, emit_p)
+        refined_class_from_spectrum(p['asd_emit_wvl'], p['asd_emit_rfl'], MIN_VALID_BANDS['emit'])
         for p in pits.values()
     ]
     asd_native_tree = [
-        refined_class_from_spectrum(p['asd_wvl'], p['asd_rfl'], emit_w, emit_p)
+        refined_class_from_spectrum(p['asd_wvl'], p['asd_rfl'], MIN_VALID_BANDS['emit'])
         for p in pits.values()
     ]
     tree_counts = []
