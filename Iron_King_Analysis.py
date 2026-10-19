@@ -1,27 +1,25 @@
 """
 Map acid-mine-drainage (AMD) iron-bearing precipitates at the Iron King Mine
-Superfund site (Dewey-Humboldt, AZ) from field and airborne/orbital imaging
-spectroscopy.
+Superfund site (Dewey-Humboldt, AZ) from lab and airborne/orbital hyperspectral data.
 
 Inputs (paths are relative to the current working directory; run from the
 repository root):
 
-- ``data/asd/*.txt``             ASD field spectra, one file per sampling pit
+- ``data/asd/*.txt``             ASD lab spectra, one file per sample
 - ``data/emit_ortho_crop.nc``    EMIT L2A reflectance, orthorectified and cropped
-- ``data/aviris_rfl.hdr``        AVIRIS reflectance, ENVI format (+ binary)
+- ``data/aviris_rfl.hdr``        AVIRIS reflectance, ENVI format 
 - ``data/aviris5_rfl.nc``        AVIRIS-5 reflectance, NetCDF with a
                                  ``reflectance`` group
-- ``data/IronKing.kml``          Area-of-interest (AOI) polygon(s)
+- ``data/IronKing.kml``          Area-of-interest (AOI) polygon
 - ``ref_spectra/{crowley,usgs_minerals,relab}``  laboratory reference spectra
 
 Processing steps (see ``main``):
 
 1. Load all sources and the pure-mineral reference library.
-2. Co-locate each pit with its EMIT, AVIRIS and AVIRIS-5 pixel and convolve
-   the ASD spectrum to EMIT bands.
+2. Co-locate each sample with its EMIT, AVIRIS and AVIRIS-5 pixel.
 3. Clip each image to the AOI and build mean reference endmembers on every
    sensor's band grid.
-4. Compute continuum-removed band parameters for pit spectra and AOI means.
+4. Compute continuum-removed band parameters for lab spectra and AOI means.
 5. Classify every AOI pixel three ways: a rule-based decision tree on band
    parameters, spectral angle mapping (SAM), and non-negative least squares
    (NNLS) unmixing.
