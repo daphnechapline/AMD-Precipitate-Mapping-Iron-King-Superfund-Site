@@ -39,17 +39,21 @@ if _missing:
         f'Missing reference inputs (relative to {os.getcwd()}): {", ".join(_missing)}. '
         'Run from the repository root; see README.md for the expected layout.')
 
-# NOTE (review): this script and Iron_King_Analysis.py prepare the library
-# differently. Here, Crowley "paracoquimbite" is counted as coquimbite, and
-# continuum removal does not mask the water-vapor windows or non-positive
-# values. The decision-tree windows are therefore derived from slightly
-# different spectra than those used for the SAM/NNLS endmembers. USGS spectra
+# Same library preparation as Iron_King_Analysis: Crowley "paracoquimbite"
+# is counted as coquimbite, and continuum removal excludes the water-vapor
+# windows and non-positive values before the hull is fitted. USGS spectra
 # with a noise index above 2e-4 were removed from the library by hand.
+
+BAD_WAVELENGTH_WINDOWS = [(1275, 1475), (1750, 1975)]
 
 
 def continuum_removal(refl: np.ndarray, wavelengths: np.ndarray) -> np.ndarray:
     """
-    Divide a spectrum by its upper convex hull (non-NaN bands only).
+    Divide a spectrum by its upper convex hull.
+
+    Water-vapor bands (``BAD_WAVELENGTH_WINDOWS``) and non-positive values
+    are excluded before the hull is fitted, matching
+    ``Iron_King_Analysis.continuum_removal``.
 
     Parameters
     ----------
@@ -61,12 +65,24 @@ def continuum_removal(refl: np.ndarray, wavelengths: np.ndarray) -> np.ndarray:
     Returns
     -------
     np.ndarray
-        Continuum-removed spectrum, NaN where ``refl`` is NaN.
+        Continuum-removed spectrum, NaN on excluded bands. All NaN if fewer
+        than 11 valid bands remain or the hull fit fails.
     """
-    mask = ~np.isnan(refl)
-    chq = SpectrumConvexHullQuotient(refl[mask].tolist(), wavelengths[mask].tolist())
+    refl = np.asarray(refl, dtype=float).copy()
+    wavelengths = np.asarray(wavelengths, dtype=float)
+    bad = np.zeros(len(wavelengths), dtype=bool)
+    for lo, hi in BAD_WAVELENGTH_WINDOWS:
+        bad |= (wavelengths >= lo) & (wavelengths <= hi)
+    refl[bad] = np.nan
+    mask = np.isfinite(refl) & (refl > 0)
     cr = np.full(len(wavelengths), np.nan)
-    cr[mask] = chq.get_continuum_removed_spectrum()
+    if int(mask.sum()) < 11:
+        return cr
+    try:
+        chq = SpectrumConvexHullQuotient(refl[mask].tolist(), wavelengths[mask].tolist())
+        cr[mask] = chq.get_continuum_removed_spectrum()
+    except (ValueError, TypeError):
+        return np.full(len(wavelengths), np.nan)
     return cr
 
 

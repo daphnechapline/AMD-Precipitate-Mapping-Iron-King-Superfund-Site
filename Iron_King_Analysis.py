@@ -938,7 +938,9 @@ def classify_minerals(text: str) -> set[str]:
     Identify target minerals named in a reference-spectrum label.
 
     Matching is case-insensitive substring search, so e.g. "natrojarosite"
-    counts as jarosite. Paracoquimbite is not counted as coquimbite.
+    counts as jarosite. Paracoquimbite is not counted as coquimbite;
+    ``load_reference_spectra`` labels Crowley ``paracoquimbite.txt`` as
+    coquimbite separately.
 
     Parameters
     ----------
@@ -1100,9 +1102,10 @@ def load_reference_spectra() -> list[dict[str, Any]]:
     Load the Crowley, USGS and RELAB libraries and keep pure target-mineral spectra.
 
     A spectrum is kept if its label names exactly one mineral in
-    ``MINERAL_KEYS`` and it has VNIR coverage (``has_vnir_coverage``). USGS
-    spectra with a noise index above 2e-4 were removed from the library by
-    hand and are not filtered here.
+    ``MINERAL_KEYS`` and it has VNIR coverage (``has_vnir_coverage``).
+    Crowley ``paracoquimbite.txt`` is labeled coquimbite. USGS spectra with
+    a noise index above 2e-4 were removed from the library by hand and are
+    not filtered here.
 
     Returns
     -------
@@ -1118,6 +1121,9 @@ def load_reference_spectra() -> list[dict[str, Any]]:
         raw = os.path.splitext(os.path.basename(path))[0]
         w, r = read_crowley(path)
         mins = classify_minerals(raw)
+        # Crowley paracoquimbite.txt is a coquimbite reference.
+        if raw.lower() == 'paracoquimbite':
+            mins = {'coquimbite'}
         records.append(dict(wvl=w, rfl=r, mineral=(next(iter(mins)) if len(mins) == 1 else None),
                             is_pure=len(mins) == 1, library='crowley'))
     for path in sorted(glob.glob(f'{REF_DIR}/usgs_minerals/*.txt')):

@@ -86,7 +86,7 @@ paths.
 | `data/aviris_rfl.hdr` | AVIRIS surface reflectance in ENVI format, with `map info` in UTM, `wavelength` (nm) and, optionally, `fwhm` (otherwise 10 nm is assumed). Values stored as reflectance × 10000 are detected and rescaled. |
 | `data/aviris5_rfl.nc` | AVIRIS-5 reflectance NetCDF. Root variables `easting` and `northing` (UTM 12N, m). A `reflectance` group with `reflectance` (dimensions: band, `northing`, `easting`), `wavelength` and `fwhm` (nm). |
 | `data/IronKing.kml` | Study-area polygon or polygons. |
-| `ref_spectra/crowley/*.txt` | Two whitespace-delimited columns: wavelength (µm) and reflectance. The mineral is read from the file name. |
+| `ref_spectra/crowley/*.txt` | Two whitespace-delimited columns: wavelength (µm) and reflectance. The mineral is read from the file name. `paracoquimbite.txt` is counted as coquimbite. |
 | `ref_spectra/usgs_minerals/*.txt` | USGS splib07 ASD-resampled spectra: one header line (`… Record=N: <sample description>`), then one reflectance value per line on the shared 2151-channel wavelength file. Spectra with a noise index above 2×10⁻⁴ were removed by hand before they were placed here. The noise index is the median absolute second difference divided by the median reflectance between 500 and 1350 nm. |
 | `ref_spectra/relab/*.tab` | RELAB spectra: wavelength (nm) and reflectance columns. The mineral is read from `speclib:mineral_subtype` and `speclib:specimen_name` in the PDS4 `.xml` label beside each file. |
 
@@ -130,7 +130,8 @@ python Iron_King_Analysis.py           # full pipeline, writes outputs/
 
 **Band parameters.**
 - Spectra are continuum-removed by dividing by the upper convex hull
-  (`pysptools`).
+  (`pysptools`). Water-vapor bands and non-positive values are excluded
+  before the hull is fitted, in both scripts.
 - The recorded parameters are only the positions the decision tree uses: the
   ~900 nm Fe³⁺ band center (searched from 720 nm to 1275 nm, the edge of the
   first water-vapor window), its short-wavelength shoulder (`b900_start`), the
@@ -177,12 +178,6 @@ The tunable constants are at the top of `Iron_King_Analysis.py`:
 
 These are documented, not changed, because changing them would alter results:
 
-- **Library preparation differs between the scripts.**
-  `Reference_Spectra_Analysis.py` counts Crowley "paracoquimbite" as
-  coquimbite and does not mask water-vapor bands before continuum removal.
-  `Iron_King_Analysis.py` does both the other way. USGS noise filtering is
-  not one of these differences: spectra above a 2×10⁻⁴ noise index were
-  removed from the library by hand.
 - **Nearest-pixel lookups do not check bounds.** If a pit falls outside the
   EMIT or AVIRIS-5 scene, its nearest edge pixel is used silently.
 - **All warnings are suppressed** (`warnings.simplefilter('ignore')`).
