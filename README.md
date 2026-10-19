@@ -197,8 +197,6 @@ These are documented, not changed, because changing them would alter results:
 - **Nearest-pixel lookups do not check bounds.** If a pit falls outside the
   EMIT or AVIRIS-5 scene, its nearest edge pixel is used silently.
 - **All warnings are suppressed** (`warnings.simplefilter('ignore')`).
-- **No automated tests.** `test/make_synthetic_data.py` checks that the
-  pipeline runs end to end, not that the results are correct.
 
 ## Citation and license
 
