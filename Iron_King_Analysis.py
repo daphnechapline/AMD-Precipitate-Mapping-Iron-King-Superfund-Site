@@ -214,7 +214,9 @@ def envi_georef_from_hdr(hdr_path: str) -> tuple[CRS, Affine]:
         UTM CRS from the zone/hemisphere fields, or the CRS parsed from
         ``coordinate system string`` for non-UTM projections.
     transform : rasterio.transform.Affine
-        North-up pixel-to-map transform (rotation is not supported).
+        North-up pixel-to-map transform (rotation is not supported). The
+        ``map info`` tie point is the upper-left corner of the 1-based
+        reference pixel, matching GDAL's ENVI driver.
 
     Raises
     ------
@@ -242,13 +244,9 @@ def envi_georef_from_hdr(hdr_path: str) -> tuple[CRS, Affine]:
         if not m_wkt:
             raise ValueError(f'Unsupported ENVI projection: {proj_name}')
         crs = CRS.from_wkt(m_wkt.group(1))
-    # The tie point (map_x, map_y) is treated as the center of reference pixel
-    # (ref_px, ref_py), so the grid origin is shifted back half a pixel.
-    # NOTE (review): GDAL's ENVI driver treats the tie point as the pixel's
-    # upper-left corner (no half-pixel shift). For a {1, 1, x, y} header this
-    # function places the origin 0.5 px west and north of GDAL's result.
-    west = map_x - ps_x * ((ref_px - 1.0) + 0.5)
-    north = map_y + ps_y * ((ref_py - 1.0) + 0.5)
+    # Tie point is the upper-left corner of the 1-based reference pixel.
+    west = map_x - ps_x * (ref_px - 1.0)
+    north = map_y + ps_y * (ref_py - 1.0)
     return crs, Affine(ps_x, 0.0, west, 0.0, -ps_y, north)
 
 

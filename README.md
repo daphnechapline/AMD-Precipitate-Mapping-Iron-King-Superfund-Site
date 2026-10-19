@@ -177,10 +177,6 @@ The tunable constants are at the top of `Iron_King_Analysis.py`:
 
 These are documented, not changed, because changing them would alter results:
 
-- **ENVI georeferencing half-pixel offset.** `envi_georef_from_hdr` treats the
-  `map info` tie point as a pixel center. GDAL treats it as the pixel's
-  upper-left corner, so the AVIRIS grid here sits 0.5 pixel west and north of
-  where GDAL puts it. Confirm which convention the AVIRIS product follows.
 - **Inconsistent b900 search window.** Band-parameter tables and reference
   statistics search the ~900 nm band in 720–1200 nm, but decision-tree
   classification searches 720–1300 nm.
