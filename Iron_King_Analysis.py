@@ -469,7 +469,7 @@ def first_cr_unity(
 def compute_band_params(
     cr: npt.ArrayLike,
     wavelengths: npt.ArrayLike,
-    b900_max: float = 1300,
+    b900_max: float = 1275,
 ) -> dict[str, float] | None:
     """
     Derive the band positions used by the decision tree.
@@ -485,8 +485,9 @@ def compute_band_params(
     wavelengths : array_like
         Band centers in nm, shape (n_bands,).
     b900_max : float, optional
-        Upper limit (nm) of the ~900 nm Fe3+ band search window (lower limit
-        is 720 nm).
+        Upper limit (nm) of the ~900 nm Fe3+ band search window. The default,
+        1275 nm, is the short-wavelength edge of the first water-vapor window.
+        The lower limit is 720 nm.
 
     Returns
     -------
@@ -548,7 +549,7 @@ def compute_band_params(
 
 
 def band_params_from_spectrum(
-    wvl: npt.ArrayLike, rfl: npt.ArrayLike, b900_max: float = 1300
+    wvl: npt.ArrayLike, rfl: npt.ArrayLike, b900_max: float = 1275
 ) -> dict[str, Any] | None:
     """
     Continuum-remove a reflectance spectrum and compute its band parameters.
@@ -711,9 +712,6 @@ def refined_class_from_spectrum(wvl: npt.ArrayLike, rfl: npt.ArrayLike) -> int:
     int
         Class id 0-8 (see ``refined_mineral_class``).
     """
-    # NOTE (review): uses the default b900_max=1300 nm, whereas the band
-    # parameter tables in main() and the reference statistics in
-    # Reference_Spectra_Analysis.py search the ~900 nm band up to 1200 nm.
     params = band_params_from_spectrum(wvl, rfl)
     if not params:
         return 0
@@ -1724,7 +1722,7 @@ def main() -> None:
         ):
             if wvl_key not in pit:
                 continue
-            params = band_params_from_spectrum(pit[wvl_key], pit[rfl_key], b900_max=1200)
+            params = band_params_from_spectrum(pit[wvl_key], pit[rfl_key])
             if not params:
                 continue
             param_rows.append(dict(
@@ -1739,7 +1737,7 @@ def main() -> None:
             np.nanmean(np.vstack([p['asd_emit_rfl'] for p in pits.values()]), axis=0)),
     }
     for spec_id, (source, wvl, rfl) in means.items():
-        params = band_params_from_spectrum(wvl, rfl, b900_max=1200)
+        params = band_params_from_spectrum(wvl, rfl)
         if params:
             param_rows.append(dict(
                 category='mean', id=spec_id, source=source,

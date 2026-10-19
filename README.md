@@ -132,7 +132,8 @@ python Iron_King_Analysis.py           # full pipeline, writes outputs/
 - Spectra are continuum-removed by dividing by the upper convex hull
   (`pysptools`).
 - The recorded parameters are only the positions the decision tree uses: the
-  ~900 nm Fe³⁺ band center, its short-wavelength shoulder (`b900_start`), the
+  ~900 nm Fe³⁺ band center (searched from 720 nm to 1275 nm, the edge of the
+  first water-vapor window), its short-wavelength shoulder (`b900_start`), the
   ~2265 nm jarosite band center, and the continuum-removed minima in the
   450–550, 500–600, and 600–750 nm windows. A position is recorded only when
   the band is deeper than 0.01. Depths, areas, and the area-bisecting
@@ -177,9 +178,6 @@ The tunable constants are at the top of `Iron_King_Analysis.py`:
 
 These are documented, not changed, because changing them would alter results:
 
-- **Inconsistent b900 search window.** Band-parameter tables and reference
-  statistics search the ~900 nm band in 720–1200 nm, but decision-tree
-  classification searches 720–1300 nm.
 - **Library preparation differs between the scripts.**
   `Reference_Spectra_Analysis.py` counts Crowley "paracoquimbite" as
   coquimbite, does not noise-filter USGS spectra, and does not mask

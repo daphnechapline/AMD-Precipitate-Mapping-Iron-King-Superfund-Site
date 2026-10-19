@@ -144,7 +144,7 @@ def spectrum_params(wvl: npt.ArrayLike, rfl: npt.ArrayLike) -> dict[str, Any] | 
     Returns
     -------
     dict or None
-        ``b900_center`` (720-1200 nm), ``b900_start`` (only if a NIR band was
+        ``b900_center`` (720-1275 nm), ``b900_start`` (only if a NIR band was
         found), ``b2265_center`` (2230-2290 nm), plus ``wavelengths`` and
         ``cr``. None if there are too few valid points or the hull fit fails.
     """
@@ -157,9 +157,9 @@ def spectrum_params(wvl: npt.ArrayLike, rfl: npt.ArrayLike) -> dict[str, Any] | 
     except (IndexError, ValueError):
         return None
     valid = ~np.isnan(cr)
-    if valid.sum() < 11 or ((wvl[valid] >= 720) & (wvl[valid] <= 1200)).sum() < 3:
+    if valid.sum() < 11 or ((wvl[valid] >= 720) & (wvl[valid] <= 1275)).sum() < 3:
         return None
-    center = band_center(wvl, cr, 720, 1200)
+    center = band_center(wvl, cr, 720, 1275)
     return dict(
         b900_center=center,
         b900_start=band_edge(wvl, cr) if np.isfinite(center) else np.nan,
