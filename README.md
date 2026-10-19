@@ -28,7 +28,6 @@ Every pixel inside the study-area polygon is classified three independent ways:
 | `Iron_King_Analysis.py` | Main pipeline: loads all data, computes band parameters, runs the three classifiers, writes tables to `outputs/`. |
 | `Reference_Spectra_Analysis.py` | Prints reference-library statistics (mean, ±1σ, ±2σ) for the diagnostic band positions that the decision-tree windows are based on. |
 | `requirements.txt` | Python dependencies. |
-| `test/make_synthetic_data.py` | Generates a small synthetic dataset in every input format, for checking an installation without the real data. |
 
 ## Requirements
 
