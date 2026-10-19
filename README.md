@@ -52,22 +52,6 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-## Verify the installation (no real data needed)
-
-Generate a synthetic dataset and run both scripts on it:
-
-```bash
-python test/make_synthetic_data.py test/synthetic
-cd test/synthetic
-python ../../Reference_Spectra_Analysis.py
-python ../../Iron_King_Analysis.py
-cd ../..
-```
-
-Both scripts should exit without errors. The second one writes five CSV files
-to `test/synthetic/outputs/` and takes about 15 seconds. The synthetic spectra
-are made-up Gaussian absorptions, so the numbers have no scientific meaning.
-
 ## Input data
 
 The input data is **not** included in this repository. Put it in the layout
