@@ -1,5 +1,5 @@
 """
-Summarize diagnostic band positions of pure reference spectra for the eight
+Summarize diagnostic band positions of reference spectra for the eight
 target AMD minerals.
 
 Loads the Crowley, USGS splib07 and RELAB libraries from ``ref_spectra/``,
