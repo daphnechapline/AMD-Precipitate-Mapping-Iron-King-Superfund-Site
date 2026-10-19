@@ -170,7 +170,6 @@ The tunable constants are at the top of `Iron_King_Analysis.py`:
 | Constant | Default | Meaning |
 |----------|---------|---------|
 | `BAD_WAVELENGTH_WINDOWS` | `[(1275, 1475), (1750, 1975)]` | Masked water-vapor windows (nm). |
-| `MIN_VALID_BANDS` | EMIT and ASD 11; AVIRIS and AVIRIS-5 13 | Minimum number of valid bands required to classify a spectrum. |
 | `SAM_MAX_ANGLE_RAD` | `0.2` | SAM rejection threshold (radians). |
 | `NOISE_THRESHOLD` | `2e-4` | USGS reference spectra noisier than this are dropped. |
 

@@ -119,14 +119,6 @@ PITS = {
     'IK24-PIT-010': (385323, 3818149),
 }
 
-# Minimum number of finite, positive bands (outside the water-vapor windows)
-# required before a spectrum is classified.
-MIN_VALID_BANDS = {
-    'emit': 11,
-    'aviris': 13,
-    'aviris5': 13,
-}
-
 # Decision-tree positions written to band_params.csv. A center is NaN when
 # that band is absent or shallower than 0.01. Depths, areas, and WAC are
 # not calculated. See compute_band_params.
@@ -593,36 +585,6 @@ def band_params_from_spectrum(
     return params
 
 
-def mask_spectrum(
-    wvl: npt.ArrayLike, rfl: npt.ArrayLike, min_valid: int
-) -> np.ndarray | None:
-    """
-    Mask water-vapor and non-positive bands.
-
-    Parameters
-    ----------
-    wvl : array_like
-        Band centers in nm, shape (n_bands,).
-    rfl : array_like
-        Reflectance, shape (n_bands,).
-    min_valid : int
-        Minimum number of finite, positive bands required.
-
-    Returns
-    -------
-    np.ndarray or None
-        Masked spectrum, or None if fewer than ``min_valid`` bands remain.
-    """
-    wvl = np.asarray(wvl, dtype=float)
-    rfl = apply_bad_wavelength_mask(wvl, rfl)
-    valid = np.isfinite(rfl) & (rfl > 0)
-    if int(valid.sum()) < min_valid:
-        return None
-    out = np.asarray(rfl, dtype=float).copy()
-    out[~valid] = np.nan
-    return out
-
-
 def cr_absorption_depth(
     cr: npt.ArrayLike, wvl: npt.ArrayLike, wmin: float, wmax: float, min_points: int = 2
 ) -> tuple[float, float]:
@@ -735,9 +697,7 @@ def refined_mineral_class(params: dict[str, Any]) -> int:
     return 0
 
 
-def refined_class_from_spectrum(
-    wvl: npt.ArrayLike, rfl: npt.ArrayLike, min_valid: int
-) -> int:
+def refined_class_from_spectrum(wvl: npt.ArrayLike, rfl: npt.ArrayLike) -> int:
     """
     Classify one reflectance spectrum with the decision tree.
 
@@ -747,21 +707,16 @@ def refined_class_from_spectrum(
         Band centers in nm.
     rfl : array_like
         Reflectance spectrum.
-    min_valid : int
-        Minimum number of valid bands, passed to ``mask_spectrum``.
 
     Returns
     -------
     int
         Class id 0-8 (see ``refined_mineral_class``).
     """
-    sm = mask_spectrum(wvl, rfl, min_valid)
-    if sm is None:
-        return 0
     # NOTE (review): uses the default b900_max=1300 nm, whereas the band
     # parameter tables in main() and the reference statistics in
     # Reference_Spectra_Analysis.py search the ~900 nm band up to 1200 nm.
-    params = band_params_from_spectrum(wvl, sm)
+    params = band_params_from_spectrum(wvl, rfl)
     if not params:
         return 0
     return refined_mineral_class(params)
@@ -1810,26 +1765,23 @@ def main() -> None:
     print(summary_df.to_string(index=False))
 
     # --- Decision-tree classification --------------------------------------
-    def tree_pixel(wvl: np.ndarray, min_valid: int) -> Callable[[np.ndarray], int]:
+    def tree_pixel(wvl: np.ndarray) -> Callable[[np.ndarray], int]:
         """Build a per-pixel decision-tree classifier for one sensor."""
         def classify(spec: np.ndarray) -> int:
             spec = np.asarray(spec, dtype=float).copy()
             spec[~np.isfinite(spec) | (spec <= 0)] = np.nan
-            return refined_class_from_spectrum(wvl, spec, min_valid)
+            return refined_class_from_spectrum(wvl, spec)
         return classify
 
-    av5_tree = map_classes(
-        wvl_av5, av5_cube, av5_inside, tree_pixel(wvl_av5, MIN_VALID_BANDS['aviris5']))
-    av_tree = map_classes(
-        wvl_av, av_win, av_inside, tree_pixel(wvl_av, MIN_VALID_BANDS['aviris']))
-    emit_tree = map_classes(
-        wvl_emit, emit_cube, emit_inside, tree_pixel(wvl_emit, MIN_VALID_BANDS['emit']))
+    av5_tree = map_classes(wvl_av5, av5_cube, av5_inside, tree_pixel(wvl_av5))
+    av_tree = map_classes(wvl_av, av_win, av_inside, tree_pixel(wvl_av))
+    emit_tree = map_classes(wvl_emit, emit_cube, emit_inside, tree_pixel(wvl_emit))
     asd_emit_tree = [
-        refined_class_from_spectrum(p['asd_emit_wvl'], p['asd_emit_rfl'], MIN_VALID_BANDS['emit'])
+        refined_class_from_spectrum(p['asd_emit_wvl'], p['asd_emit_rfl'])
         for p in pits.values()
     ]
     asd_native_tree = [
-        refined_class_from_spectrum(p['asd_wvl'], p['asd_rfl'], MIN_VALID_BANDS['emit'])
+        refined_class_from_spectrum(p['asd_wvl'], p['asd_rfl'])
         for p in pits.values()
     ]
     tree_counts = []
