@@ -174,15 +174,3 @@ The tunable constants are at the top of `Iron_King_Analysis.py`:
 | `BAD_WAVELENGTH_WINDOWS` | `[(1275, 1475), (1750, 1975)]` | Masked water-vapor windows (nm). |
 | `SAM_MAX_ANGLE_RAD` | `0.2` | SAM rejection threshold (radians). |
 
-## Known issues and review notes
-
-These are documented, not changed, because changing them would alter results:
-
-- **Nearest-pixel lookups do not check bounds.** If a pit falls outside the
-  EMIT or AVIRIS-5 scene, its nearest edge pixel is used silently.
-- **All warnings are suppressed** (`warnings.simplefilter('ignore')`).
-
-## Citation and license
-
-**TODO:** author(s), citation for any associated publication, and a license.
-Until a license is added, default copyright applies.
