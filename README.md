@@ -4,6 +4,8 @@ Maps ferric iron-bearing acid-mine-drainage (AMD) precipitates at the Iron King 
 Humboldt Smelter Superfund site (Dewey-Humboldt, Arizona) by analyzing laboratory ASD, 
 EMIT, AVIRIS-classic and AVIRIS-5 hyperspectral data.
 
+DOI: https://doi.org/10.5281/zenodo.23485716
+
 Eight target minerals are mapped:
 
 | ID | Mineral        | ID | Mineral        |
