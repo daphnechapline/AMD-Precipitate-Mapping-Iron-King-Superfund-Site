@@ -81,7 +81,7 @@ paths.
 
 | Input | Expected format |
 |-------|-----------------|
-| `data/asd/<PIT>.txt` | Whitespace-delimited table with a header row that includes `Wavelength` (nm) and `Reflectance` columns. File stems must match the keys of `PITS` in `Iron_King_Analysis.py`. Files with `POW` in the name are skipped. Pits with no file are skipped with a warning. |
+| `data/asd/<PIT>.txt` | Whitespace-delimited table with a header row that includes `Wavelength` (nm) and `Reflectance` columns. |
 | `data/emit_ortho_crop.nc` | EMIT L2A reflectance, orthorectified to a regular lat/lon grid and cropped to the site. Variable `reflectance` with dimensions `wavelengths`, `latitude`, `longitude` (any order). `wavelengths` and `fwhm` (nm) variables. Fill value −9999. This matches the orthorectified output of the LP DAAC `emit_tools` module. |
 | `data/aviris_rfl.hdr` | AVIRIS surface reflectance in ENVI format, with `map info` in UTM, `wavelength` (nm) and, optionally, `fwhm` (otherwise 10 nm is assumed). Values stored as reflectance × 10000 are detected and rescaled. |
 | `data/aviris5_rfl.nc` | AVIRIS-5 reflectance NetCDF. Root variables `easting` and `northing` (UTM 12N, m). A `reflectance` group with `reflectance` (dimensions: band, `northing`, `easting`), `wavelength` and `fwhm` (nm). |
@@ -90,22 +90,14 @@ paths.
 | `ref_spectra/usgs_minerals/*.txt` | USGS splib07 ASD-resampled spectra: one header line (`… Record=N: <sample description>`), then one reflectance value per line on the shared 2151-channel wavelength file. |
 | `ref_spectra/relab/*.tab` | RELAB spectra: wavelength (nm) and reflectance columns. The mineral is read from `speclib:mineral_subtype` and `speclib:specimen_name` in the PDS4 `.xml` label beside each file. |
 
-A reference spectrum counts as "pure" when its label names exactly one of the
-eight target minerals. Matching is by case-insensitive substring, so
-"natrojarosite" counts as jarosite.
 
 ### Data sources
 
 | Input | Source |
 |-------|--------|
-| ASD field spectra | Field campaign at the ten `IK24-PIT-*` pits. **TODO:** collection date, instrument and protocol. |
-| EMIT | NASA EMIT L2A Surface Reflectance (EMITL2ARFL), NASA LP DAAC. **TODO:** granule ID. |
-| AVIRIS | NASA/JPL AVIRIS. **TODO:** flight-line ID and processing level. |
-| AVIRIS-5 | NASA/JPL AVIRIS-5. **TODO:** flight-line ID and processing level. |
-| AOI polygon | **TODO:** origin of `IronKing.kml`. |
 | USGS library | Kokaly, R.F., et al. (2017). *USGS Spectral Library Version 7 Data.* U.S. Geological Survey data release. https://doi.org/10.5066/F7RR1WDJ (ASD-resampled "s07_ASD" files). |
 | RELAB library | Brown University RELAB spectral library, distributed through the NASA PDS Geosciences Node (PDS4 format). |
-| Crowley library | Crowley, J.K., et al. (2003). Spectral reflectance properties (0.4–2.5 µm) of secondary Fe-oxide, Fe-hydroxide, and Fe-sulphate-hydrate minerals associated with sulphide-bearing mine wastes. *Geochemistry: Exploration, Environment, Analysis*, 3, 219–228. **TODO:** confirm this is the source of the `crowley/` files. |
+| Crowley library | Crowley, J.K., et al. (2003). Spectral reflectance properties (0.4–2.5 µm) of secondary Fe-oxide, Fe-hydroxide, and Fe-sulphate-hydrate minerals associated with sulphide-bearing mine wastes. *Geochemistry: Exploration, Environment, Analysis*, 3, 219–228. |
 
 ## Usage
 
@@ -128,13 +120,6 @@ python Iron_King_Analysis.py           # full pipeline, writes outputs/
 
 The same tables are also printed to the terminal.
 
-### Runtime
-
-Pixels are classified one at a time in Python, with a convex-hull continuum
-removal for each pixel. Runtime therefore grows linearly with the number of
-pixels inside the AOI, about 5,000 pixels in roughly 13 seconds on the
-synthetic dataset (Apple Silicon). A large AOI or fine-resolution imagery will
-take proportionally longer.
 
 ## Method summary
 
