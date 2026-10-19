@@ -112,12 +112,10 @@ python Iron_King_Analysis.py           # full pipeline, writes outputs/
 
 | File | Contents |
 |------|----------|
-| `band_params.csv` | Band parameters for each pit and source (`asd`, `emit`, `aviris`, `aviris5`, and `asd_emit`, which is ASD convolved to EMIT bands), plus the AOI-mean spectrum of each sensor. Column definitions are in the `compute_band_params` docstring. |
+| `band_params.csv` | Band parameters for each pit source (`asd`, `emit`, `aviris`, `aviris5`, and `asd_emit`, which is ASD convolved to EMIT bands), plus the AOI-mean spectrum of each sensor. Column definitions are in the `compute_band_params` docstring. |
 | `band_params_by_source.csv` | Mean and standard deviation of each band parameter across the pits, per source. |
-| `class_shares.csv` | Pixel (or pit) counts and percentages per class for every method × source combination. |
+| `class_shares.csv` | Pixel (or sample) counts and percentages per class for every method × source combination. |
 | `nnls_mean_abundance.csv` | Mean NNLS abundance per mineral and source. |
-
-The same tables are also printed to the terminal.
 
 
 ## Method summary
