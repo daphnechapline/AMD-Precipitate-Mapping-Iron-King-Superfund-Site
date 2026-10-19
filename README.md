@@ -91,7 +91,7 @@ paths.
 | `ref_spectra/relab/*.tab` | RELAB spectra: wavelength (nm) and reflectance columns. The mineral is read from `speclib:mineral_subtype` and `speclib:specimen_name` in the PDS4 `.xml` label beside each file. |
 
 
-### Data sources
+### Reference Data sources
 
 | Input | Source |
 |-------|--------|
