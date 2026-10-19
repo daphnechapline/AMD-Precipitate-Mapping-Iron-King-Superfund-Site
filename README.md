@@ -91,11 +91,11 @@ paths.
 | `ref_spectra/relab/*.tab` | RELAB spectra: wavelength (nm) and reflectance columns. The mineral is read from `speclib:mineral_subtype` and `speclib:specimen_name` in the PDS4 `.xml` label beside each file. |
 
 
-### Reference Data sources
+### Reference Data Sources
 
 | Input | Source |
 |-------|--------|
-| USGS library | Kokaly, R.F., et al. (2017). *USGS Spectral Library Version 7 Data.* U.S. Geological Survey data release. https://doi.org/10.5066/F7RR1WDJ (ASD-resampled "s07_ASD" files). |
+| USGS library | Kokaly, R.F., et al. (2017). *USGS Spectral Library Version 7 Data.* U.S. Geological Survey data release. https://doi.org/10.5066/F7RR1WDJ . |
 | RELAB library | Brown University RELAB spectral library, distributed through the NASA PDS Geosciences Node (PDS4 format). |
 | Crowley library | Crowley, J.K., et al. (2003). Spectral reflectance properties (0.4–2.5 µm) of secondary Fe-oxide, Fe-hydroxide, and Fe-sulphate-hydrate minerals associated with sulphide-bearing mine wastes. *Geochemistry: Exploration, Environment, Analysis*, 3, 219–228. |
 
@@ -173,7 +173,6 @@ The tunable constants are at the top of `Iron_King_Analysis.py`:
 | `MIN_VALID_BANDS` | EMIT and ASD 11; AVIRIS and AVIRIS-5 13 | Minimum number of valid bands required to classify a spectrum. |
 | `SAM_MAX_ANGLE_RAD` | `0.2` | SAM rejection threshold (radians). |
 | `NOISE_THRESHOLD` | `2e-4` | USGS reference spectra noisier than this are dropped. |
-| `PITS` | 10 pits | Pit name → UTM 12N easting/northing. |
 
 ## Known issues and review notes
 
