@@ -50,7 +50,6 @@ import geopandas as gpd
 import spectral
 from spectral import BandResampler
 from spectral.algorithms.algorithms import spectral_angles
-from scipy import integrate
 from scipy.signal import savgol_filter
 from pysptools.spectro import SpectrumConvexHullQuotient
 from pysptools.abundance_maps.amaps import NNLS
@@ -131,13 +130,12 @@ SG = {
     'aviris5': (13, 3),
 }
 
-# Columns written to band_params.csv (see compute_band_params for meanings).
+# Decision-tree positions written to band_params.csv. A center is NaN when
+# that band is absent or shallower than 0.01. Depths, areas, and WAC are
+# not calculated. See compute_band_params.
 PARAM_KEYS = [
-    'b500_center', 'b500_depth', 'b500_area',
-    'absorption_edge', 'vis_peak',
-    'b900_center', 'b900_depth', 'b900_area', 'WAC', 'b900_start',
-    'b2265_center', 'b2265_depth', 'b2265_area',
-    'cr_500_600', 'cr_450_550', 'cr_1200_1275', 'cr_600_750',
+    'b900_center', 'b900_start', 'b2265_center',
+    'cr_500_600', 'cr_450_550', 'cr_600_750',
 ]
 
 
@@ -484,11 +482,14 @@ def first_cr_unity(
 def compute_band_params(
     cr: npt.ArrayLike,
     wavelengths: npt.ArrayLike,
-    reflectance: npt.ArrayLike | None = None,
     b900_max: float = 1300,
 ) -> dict[str, float] | None:
     """
-    Derive absorption-band parameters from a continuum-removed spectrum.
+    Derive the band positions used by the decision tree.
+
+    A center is recorded only when the continuum-removed band is deeper than
+    0.01. Numeric depths, band areas, and the area-bisecting wavelength are
+    not computed.
 
     Parameters
     ----------
@@ -496,8 +497,6 @@ def compute_band_params(
         Continuum-removed spectrum, shape (n_bands,).
     wavelengths : array_like
         Band centers in nm, shape (n_bands,).
-    reflectance : array_like, optional
-        Original reflectance; needed for ``vis_peak`` and the ``b500`` band.
     b900_max : float, optional
         Upper limit (nm) of the ~900 nm Fe3+ band search window (lower limit
         is 720 nm).
@@ -507,17 +506,12 @@ def compute_band_params(
     dict or None
         Keys (NaN when a feature is absent or shallower than 0.01):
 
-        - ``b900_center/depth/area``: CR minimum, depth and integrated area
-          in 720-``b900_max`` nm.
-        - ``WAC``: wavelength that splits the b900 band area in half.
-        - ``b900_start``: short-wavelength shoulder of the b900 band
-          (first CR = 1 scanning down from 800 to 625 nm).
-        - ``b2265_center/depth/area``: jarosite feature in 2230-2290 nm.
-        - ``cr_500_600``, ``cr_450_550``, ``cr_1200_1275``, ``cr_600_750``:
-          CR minimum position in each window.
-        - ``absorption_edge``: first CR = 1 scanning up from 500 to 720 nm.
-        - ``vis_peak``: wavelength of maximum reflectance in 400-800 nm.
-        - ``b500_center/depth/area``: CR minimum in 380-700 nm.
+        - ``b900_center``: CR minimum in 720-``b900_max`` nm.
+        - ``b900_start``: short-wavelength shoulder of that band (first CR = 1
+          scanning down from 800 to 625 nm).
+        - ``b2265_center``: jarosite feature in 2230-2290 nm.
+        - ``cr_500_600``, ``cr_450_550``, ``cr_600_750``: CR minimum in each
+          window, used by the coquimbite, rhomboclase, and goethite tests.
 
         None if fewer than 11 valid CR values or fewer than 3 in the b900
         window.
@@ -529,30 +523,21 @@ def compute_band_params(
     if len(cr_v) < 11:
         return None
 
-    def store_band(
+    def store_center(
         result: dict[str, float], prefix: str, wvl_seg: np.ndarray, cr_seg: np.ndarray,
-        wmin: float, wmax: float, clip: bool = True,
     ) -> bool:
         """
-        Write ``{prefix}_center/_depth/_area`` for one band into ``result``.
+        Write ``{prefix}_center`` when the band is deeper than 0.01.
 
-        ``wmin``/``wmax`` are not used (segments are pre-selected by the
-        caller). With ``clip`` the integrand 1 - CR is clipped at zero.
-        Returns True if a band deeper than 0.01 was found.
+        Returns True if a center was stored.
         """
         result[f'{prefix}_center'] = np.nan
-        result[f'{prefix}_depth'] = np.nan
-        result[f'{prefix}_area'] = np.nan
         if len(wvl_seg) < 3:
             return False
-        min_idx = np.argmin(cr_seg)
-        depth = 1 - cr_seg[min_idx]
-        if depth <= 0.01:
+        min_idx = int(np.argmin(cr_seg))
+        if (1.0 - float(cr_seg[min_idx])) <= 0.01:
             return False
-        band_signal = np.clip(1 - cr_seg, 0, None) if clip else (1 - cr_seg)
-        result[f'{prefix}_center'] = wvl_seg[min_idx]
-        result[f'{prefix}_depth'] = depth
-        result[f'{prefix}_area'] = float(integrate.simpson(band_signal, wvl_seg))
+        result[f'{prefix}_center'] = float(wvl_seg[min_idx])
         return True
 
     # ~900 nm Fe3+ crystal-field band
@@ -561,45 +546,17 @@ def compute_band_params(
     wav_seg, cr_seg = wvl_v[bm], cr_v[bm]
     if len(wav_seg) < 3:
         return None
-    result = {}
-    b900_ok = store_band(result, 'b900', wav_seg, cr_seg, b900_min, b900_max, clip=False)
-    if b900_ok:
-        # Scan left to right; the area to the right of each band falls from
-        # the full area toward 0. WAC is linearly interpolated where it
-        # crosses half the total.
-        halfarea = result['b900_area'] / 2
-        smaller_wav, smaller_int = wav_seg[0], result['b900_area']
-        wac = wav_seg[-1]
-        for i, wav in enumerate(wav_seg):
-            partial = integrate.simpson(1 - cr_seg[i:], wav_seg[i:])
-            if partial < halfarea:
-                wac = smaller_wav + (halfarea - smaller_int) / (partial - smaller_int) * (wav - smaller_wav)
-                break
-            smaller_wav, smaller_int = wav, partial
-        result['WAC'] = wac
+    result: dict[str, float] = {}
+    if store_center(result, 'b900', wav_seg, cr_seg):
         result['b900_start'] = first_cr_unity(wvl_v, cr_v, 625, 800, descending=True)
     else:
-        result['WAC'] = np.nan
         result['b900_start'] = np.nan
     # ~2265 nm jarosite (Fe-OH) band
-    store_band(result, 'b2265', wvl_v[(wvl_v >= 2230) & (wvl_v <= 2290)],
-               cr_v[(wvl_v >= 2230) & (wvl_v <= 2290)], 2230, 2290)
+    store_center(result, 'b2265', wvl_v[(wvl_v >= 2230) & (wvl_v <= 2290)],
+                 cr_v[(wvl_v >= 2230) & (wvl_v <= 2290)])
     result['cr_500_600'] = vis_cr_band_center(wvl_v, cr_v, 500, 600)
     result['cr_450_550'] = vis_cr_band_center(wvl_v, cr_v, 450, 550)
-    result['cr_1200_1275'] = vis_cr_band_center(wvl_v, cr_v, 1200, 1275)
     result['cr_600_750'] = vis_cr_band_center(wvl_v, cr_v, 600, 750)
-    result['absorption_edge'] = first_cr_unity(wvl_v, cr_v, 500, 720)
-    result['vis_peak'] = np.nan
-    if reflectance is not None:
-        reflectance = np.asarray(reflectance, dtype=float)
-        vis = (wavelengths > 400) & (wavelengths < 800) & np.isfinite(reflectance)
-        if vis.any():
-            result['vis_peak'] = wavelengths[vis][np.argmax(reflectance[vis])]
-        # NOTE (review): unlike the other bands this uses the unfiltered `cr`,
-        # so any NaN in 380-700 nm makes np.argmin return the NaN position and
-        # yields a NaN depth/area with a spurious center.
-        b500 = (wavelengths >= 380) & (wavelengths <= 700)
-        store_band(result, 'b500', wavelengths[b500], cr[b500], 380, 700)
     return result
 
 
@@ -631,7 +588,7 @@ def band_params_from_spectrum(
     if np.isfinite(rfl).sum() < 11:
         return None
     cr = continuum_removal(rfl, wvl)
-    params = compute_band_params(cr, wvl, reflectance=rfl, b900_max=b900_max)
+    params = compute_band_params(cr, wvl, b900_max=b900_max)
     if not params:
         return None
     params['cr'] = cr
@@ -768,7 +725,8 @@ def refined_mineral_class(params: dict[str, Any]) -> int:
     980-1020 nm     8 Ferrihydrite   band shoulder 750-785 nm
     ==============  ===============  ==========================================
 
-    All absorption tests require a depth > 0.01.
+    A center is stored only when its band is deeper than 0.01, so a missing
+    center fails that test. Visible-band checks apply the same depth cutoff.
 
     Parameters
     ----------
@@ -782,8 +740,7 @@ def refined_mineral_class(params: dict[str, Any]) -> int:
         Class id 1-8, or 0 if no rule matches.
     """
     b900 = params.get('b900_center', np.nan)
-    b900_depth = params.get('b900_depth', np.nan)
-    if not np.isfinite(b900) or b900_depth <= 0.01:
+    if not np.isfinite(b900):
         return 0
     cr, wvl = params['cr'], params['wavelengths']
     b900_start = params.get('b900_start', np.nan)
@@ -805,8 +762,7 @@ def refined_mineral_class(params: dict[str, Any]) -> int:
         return 0
     if 910 <= b900 <= 940:
         c2265 = params.get('b2265_center', np.nan)
-        d2265 = params.get('b2265_depth', np.nan)
-        if np.isfinite(c2265) and np.isfinite(d2265) and d2265 > 0.01 and 2255 <= c2265 <= 2275:
+        if np.isfinite(c2265) and 2255 <= c2265 <= 2275:
             return 5
         return 0
     if 940 < b900 < 980:
@@ -1708,7 +1664,8 @@ def main() -> None:
     Outputs
     -------
     band_params.csv
-        Band parameters per pit/source and for AOI-mean spectra.
+        Decision-tree band positions per pit/source and for AOI-mean spectra
+        (see ``compute_band_params``).
     band_params_by_source.csv
         Mean and std of each band parameter across pits, per source.
     class_shares.csv

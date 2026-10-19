@@ -112,7 +112,7 @@ python Iron_King_Analysis.py           # full pipeline, writes outputs/
 
 | File | Contents |
 |------|----------|
-| `band_params.csv` | Band parameters for each pit source (`asd`, `emit`, `aviris`, `aviris5`, and `asd_emit`, which is ASD convolved to EMIT bands), plus the AOI-mean spectrum of each sensor. Column definitions are in the `compute_band_params` docstring. |
+| `band_params.csv` | Decision-tree band positions for each pit source (`asd`, `emit`, `aviris`, `aviris5`, and `asd_emit`, which is ASD convolved to EMIT bands), plus the AOI-mean spectrum of each sensor. Columns are `b900_center`, `b900_start`, `b2265_center`, `cr_500_600`, `cr_450_550`, and `cr_600_750`. A center is blank when that band is absent or shallower than 0.01. |
 | `band_params_by_source.csv` | Mean and standard deviation of each band parameter across the pits, per source. |
 | `class_shares.csv` | Pixel (or sample) counts and percentages per class for every method × source combination. |
 | `nnls_mean_abundance.csv` | Mean NNLS abundance per mineral and source. |
@@ -131,10 +131,12 @@ python Iron_King_Analysis.py           # full pipeline, writes outputs/
 **Band parameters.**
 - Spectra are continuum-removed by dividing by the upper convex hull
   (`pysptools`).
-- From the continuum-removed spectrum, the code measures the ~900 nm Fe³⁺
-  band (center, depth, area, area-bisecting wavelength `WAC`, and
-  short-wavelength shoulder `b900_start`), the ~2265 nm jarosite band, and
-  band positions in the 450–550, 500–600, 600–750 and 1200–1275 nm windows.
+- The recorded parameters are only the positions the decision tree uses: the
+  ~900 nm Fe³⁺ band center, its short-wavelength shoulder (`b900_start`), the
+  ~2265 nm jarosite band center, and the continuum-removed minima in the
+  450–550, 500–600, and 600–750 nm windows. A position is recorded only when
+  the band is deeper than 0.01. Depths, areas, and the area-bisecting
+  wavelength are not calculated.
 
 **Decision tree** (`refined_mineral_class`). Pixels are first split by the ~900
 nm band center, then confirmed with a second feature:
@@ -189,9 +191,6 @@ These are documented, not changed, because changing them would alter results:
   coquimbite, does not noise-filter USGS spectra, and does not mask
   water-vapor bands before continuum removal. `Iron_King_Analysis.py` does
   all three the other way.
-- **`b500` parameters with gaps.** The 380–700 nm band uses the unfiltered
-  continuum-removed spectrum. Any NaN in that range gives a spurious center and
-  NaN depth and area.
 - **Nearest-pixel lookups do not check bounds.** If a pit falls outside the
   EMIT or AVIRIS-5 scene, its nearest edge pixel is used silently.
 - **All warnings are suppressed** (`warnings.simplefilter('ignore')`).
