@@ -1,8 +1,8 @@
 # AMD Precipitate Mapping: Iron King Mine Superfund Site
 
-Maps iron-bearing acid-mine-drainage (AMD) precipitates at the Iron King Mine –
-Humboldt Smelter Superfund site (Dewey-Humboldt, Arizona) by combining field ASD
-spectra with EMIT, AVIRIS and AVIRIS-5 imaging spectroscopy.
+Maps ferric iron-bearing acid-mine-drainage (AMD) precipitates at the Iron King Mine –
+Humboldt Smelter Superfund site (Dewey-Humboldt, Arizona) by analyzing laboratory ASD, 
+EMIT, AVIRIS-classic and AVIRIS-5 hyperspectral data.
 
 Eight target minerals are mapped:
 
