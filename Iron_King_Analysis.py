@@ -17,6 +17,9 @@ repository root):
 Mineral classes (``MINERALS``): 1 coquimbite, 2 rhomboclase, 3 ferricopiapite,
 4 hematite, 5 jarosite, 6 goethite, 7 schwertmannite, 8 ferrihydrite;
 0 means unclassified.
+
+ASD pits are classified from the spectrum convolved to EMIT bands. SAM and
+NNLS compare that spectrum with the EMIT endmembers.
 """
 import os
 import re
@@ -1663,7 +1666,6 @@ def main() -> None:
     members_emit = mean_endmember_on_grid(pure_refs, wvl_emit, fwhm_emit)
     members_av5 = mean_endmember_on_grid(pure_refs, wvl_av5, fwhm_av5)
     members_av = mean_endmember_on_grid(pure_refs, wvl_av, fwhm_av)
-    members_asd = mean_endmember_on_grid(pure_refs, wavelengths_asd)
 
     # --- Band parameters: every pit x source, plus AOI-mean spectra --------
     param_rows = []
@@ -1731,12 +1733,8 @@ def main() -> None:
         refined_class_from_spectrum(p['asd_emit_wvl'], p['asd_emit_rfl'])
         for p in pits.values()
     ]
-    asd_native_tree = [
-        refined_class_from_spectrum(p['asd_wvl'], p['asd_rfl'])
-        for p in pits.values()
-    ]
     tree_counts = []
-    tree_counts += share_rows(asd_emit_tree, 'Decision tree', 'ASD-EMIT')
+    tree_counts += share_rows(asd_emit_tree, 'Decision tree', 'ASD')
     tree_counts += share_rows(emit_tree[emit_inside], 'Decision tree', 'EMIT')
     tree_counts += share_rows(av_tree[av_inside], 'Decision tree', 'AVIRIS')
     tree_counts += share_rows(av5_tree[av5_inside], 'Decision tree', 'AVIRIS-5')
@@ -1752,13 +1750,17 @@ def main() -> None:
     av5_sam = map_classes(wvl_av5, av5_cube, av5_inside, sam_pixel(wvl_av5, members_av5))
     av_sam = map_classes(wvl_av, av_win, av_inside, sam_pixel(wvl_av, members_av))
     emit_sam = map_classes(wvl_emit, emit_cube, emit_inside, sam_pixel(wvl_emit, members_emit))
-    asd_sam = [sam_class_from_spectrum(p['asd_wvl'], p['asd_rfl'], members_asd) for p in pits.values()]
+    asd_sam = [
+        sam_class_from_spectrum(p['asd_emit_wvl'], p['asd_emit_rfl'], members_emit)
+        for p in pits.values()
+    ]
 
     av5_abund = nnls_cube(wvl_av5, av5_cube, av5_inside, members_av5)
     av_abund = nnls_cube(wvl_av, av_win, av_inside, members_av)
     emit_abund = nnls_cube(wvl_emit, emit_cube, emit_inside, members_emit)
     asd_abund = np.vstack([
-        nnls_abundances(p['asd_wvl'], p['asd_rfl'], members_asd) for p in pits.values()
+        nnls_abundances(p['asd_emit_wvl'], p['asd_emit_rfl'], members_emit)
+        for p in pits.values()
     ])
     av5_nnls = class_from_abund_cube(av5_abund)
     av_nnls = class_from_abund_cube(av_abund)
@@ -1771,7 +1773,7 @@ def main() -> None:
     share += share_rows(emit_sam[emit_inside], 'SAM', 'EMIT')
     share += share_rows(av_sam[av_inside], 'SAM', 'AVIRIS')
     share += share_rows(av5_sam[av5_inside], 'SAM', 'AVIRIS-5')
-    share += share_rows(asd_native_tree, 'Decision tree', 'ASD')
+    share += share_rows(asd_emit_tree, 'Decision tree', 'ASD')
     share += share_rows(emit_tree[emit_inside], 'Decision tree', 'EMIT')
     share += share_rows(av_tree[av_inside], 'Decision tree', 'AVIRIS')
     share += share_rows(av5_tree[av5_inside], 'Decision tree', 'AVIRIS-5')

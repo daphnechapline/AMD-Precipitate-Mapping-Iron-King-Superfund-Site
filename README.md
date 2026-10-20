@@ -116,7 +116,7 @@ python Iron_King_Analysis.py           # full pipeline, writes outputs/
 |------|----------|
 | `band_params.csv` | Decision-tree band positions for each pit source (`asd`, `emit`, `aviris`, `aviris5`, and `asd_emit`, which is ASD convolved to EMIT bands), plus the AOI-mean spectrum of each sensor. Columns are `b900_center`, `b900_start`, `b2265_center`, `cr_500_600`, `cr_450_550`, and `cr_600_750`. A center is blank when that band is absent or shallower than 0.01. |
 | `band_params_by_source.csv` | Mean and standard deviation of each band parameter across the pits, per source. |
-| `class_shares.csv` | Pixel (or sample) counts and percentages per class for every method × source combination. |
+| `class_shares.csv` | Pixel (or sample) counts and percentages per class for every method × source combination. ASD rows are the EMIT-convolved pit spectra. |
 | `nnls_mean_abundance.csv` | Mean NNLS abundance per mineral and source. |
 
 
@@ -127,6 +127,9 @@ python Iron_King_Analysis.py           # full pipeline, writes outputs/
   non-positive values are set to NaN.
 - Each pit is matched to its nearest EMIT, AVIRIS and AVIRIS-5 pixel.
 - ASD spectra are convolved to EMIT bands with `spectral.BandResampler`.
+  Decision-tree, SAM, and NNLS classifications of the pits use that
+  convolved spectrum. SAM and NNLS compare it with the EMIT endmembers.
+  Native ASD spectra are still recorded in the `asd` rows of `band_params.csv`.
 - Reference spectra are convolved to each sensor's bands with Gaussian
   spectral response functions and averaged per mineral to form endmembers.
 
